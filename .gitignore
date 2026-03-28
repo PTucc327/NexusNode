@@ -1,0 +1,32 @@
+# Python & Virtual Environments
+.venv/
+venv/
+env/
+bin/
+lib/
+include/
+*.py[cod]
+__pycache__/
+
+# Streamlit & Local Config
+.streamlit/config.toml
+.streamlit/secrets.toml
+
+# Environment Variables & Secrets
+.env
+*.env
+secrets.json
+
+# LlamaIndex & Data Storage
+# We ignore the storage/ directory so the index is rebuilt or 
+# handled specifically in deployment rather than bloated in Git
+storage/
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+
+# Data Folder 
+# (Optional: Only ignore if your data contains private info. 
+# Keep it if you want the public to see your sample data/resume)
+.data/
