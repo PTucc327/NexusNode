@@ -8,41 +8,60 @@ load_dotenv()
 
 # --- CONFIGURATION ---
 API_KEY = os.getenv('RIOT_KEY')
-PLATFORM_ID = 'na1'        # For Summoner & League data
-REGIONAL_ROUTING = 'americas' # For Match-V5 data (Matchlist & Match Details)
+PLATFORM_ID = 'na1'        
+REGIONAL_ROUTING = 'americas' 
 QUEUE_TYPE = 'RANKED_SOLO_5x5'
 
 WATCHER = LolWatcher(API_KEY)
 
-def get_high_elo_match_ids(count=100):
-    print(f"Fetching Challenger players from {PLATFORM_ID}...")
-    match_ids = []
+def get_massive_match_ids(player_limit=50, matches_per_player=40):
+    """
+    Increases the scope to collect a much larger graph dataset.
+    """
+    print(f"🚀 Fetching Challenger league data...")
+    all_match_ids = set()
     
     try:
-        challenger_league = WATCHER.league.challenger_by_queue(PLATFORM_ID, QUEUE_TYPE)
+        chall_league = WATCHER.league.challenger_by_queue(PLATFORM_ID, QUEUE_TYPE)
+        players = chall_league['entries'][:player_limit]
         
-        # Pulling from top 10 players
-        for entry in challenger_league['entries'][:10]:
-            
-            puuid = entry['puuid']
-            summoner = WATCHER.summoner.by_puuid(PLATFORM_ID, puuid)
-            # CRITICAL: Matchlist uses REGIONAL_ROUTING ('americas')
-            player_matches = WATCHER.match.matchlist_by_puuid(REGIONAL_ROUTING, puuid, count=20)
-            match_ids.extend(player_matches)
-            
-            time.sleep(1.2) # Rate limit breathing room
-            
+        print(f"🔍 Scanning {len(players)} top-tier players for history...")
+        
+        for i, entry in enumerate(players):
+            try:
+                summoner_id = entry['summonerId']
+                summoner = WATCHER.summoner.by_id(PLATFORM_ID, summoner_id)
+                puuid = summoner['puuid']
+                
+                # Pull more matches per player
+                player_matches = WATCHER.match.matchlist_by_puuid(
+                    REGIONAL_ROUTING, puuid, count=matches_per_player
+                )
+                all_match_ids.update(player_matches)
+                
+                if (i + 1) % 5 == 0:
+                    print(f"  > Progress: {i+1}/{len(players)} players searched. Unique matches found: {len(all_match_ids)}")
+                
+                # Respect rate limits (Dev keys are very sensitive)
+                time.sleep(1.2) 
+                
+            except ApiError as e:
+                print(f"  ! Skipping player {i}: {e}")
+                continue
+                
     except ApiError as err:
-        print(f"API Error in get_ids: {err}")
+        print(f"❌ Critical API Error: {err}")
         
-    return list(set(match_ids))
+    return list(all_match_ids)
 
 def process_match_data(match_id):
     try:
-        # CRITICAL: Match details use REGIONAL_ROUTING ('americas')
         match = WATCHER.match.by_id(REGIONAL_ROUTING, match_id)
+        # Skip if match is not a standard 5v5 (e.g., remakes)
+        if match['info']['gameDuration'] < 300: 
+            return None
+            
         participants = []
-        
         for p in match['info']['participants']:
             participants.append({
                 'match_id': match_id,
@@ -58,26 +77,37 @@ def process_match_data(match_id):
             })
         return participants
     except ApiError as err:
-        print(f"Error fetching match {match_id}: {err}")
+        if err.response.status_code == 429:
+            print("⚠️ Rate limit hit! Sleeping for 10 seconds...")
+            time.sleep(10)
         return None
 
 if __name__ == "__main__":
     if not API_KEY:
         print("❌ Error: RIOT_KEY not found in .env file.")
     else:
+        # Step 1: Get a massive list of unique Match IDs
+        # 50 players * 40 matches = ~2,000 potential matches (many will be duplicates)
+        match_ids = get_massive_match_ids(player_limit=50, matches_per_player=40)
+        
         all_match_data = []
-        match_ids = get_high_elo_match_ids(count=50)
-        
-        print(f"Starting processing for {len(match_ids)} matches...")
-        
+        total = len(match_ids)
+        print(f"✅ Found {total} unique matches. Starting extraction...")
+
+        # Step 2: Extract details
         for i, m_id in enumerate(match_ids):
-            print(f"[{i+1}/{len(match_ids)}] Processing: {m_id}")
             data = process_match_data(m_id)
             if data:
                 all_match_data.extend(data)
             
-            time.sleep(1.2) 
+            # Progress bar
+            if (i + 1) % 10 == 0:
+                print(f"📦 Processed {i+1}/{total} matches...")
+            
+            time.sleep(1.2) # Essential for Dev Keys
 
+        # Step 3: Save
         df = pd.DataFrame(all_match_data)
+        # We append to the existing file or create a new one
         df.to_csv('league_match_data.csv', index=False)
-        print("✅ Data collection complete! Check 'league_match_data.csv'.")
+        print(f"✨ Success! Total data points: {len(df)}")
