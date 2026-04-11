@@ -15,44 +15,51 @@ QUEUE_TYPE = 'RANKED_SOLO_5x5'
 WATCHER = LolWatcher(API_KEY)
 
 def get_massive_match_ids(player_limit=50, matches_per_player=40):
-    """
-    Increases the scope to collect a much larger graph dataset.
-    """
     print(f"🚀 Fetching Challenger league data...")
     all_match_ids = set()
     
     try:
         chall_league = WATCHER.league.challenger_by_queue(PLATFORM_ID, QUEUE_TYPE)
-        players = chall_league['entries'][:player_limit]
+        players = chall_league.get('entries', [])[:player_limit]
         
-        print(f"🔍 Scanning {len(players)} top-tier players for history...")
+        if not players:
+            print("❌ No players found in Challenger league.")
+            return []
+
+        print(f"🔍 Scanning {len(players)} players directly via PUUID...")
         
         for i, entry in enumerate(players):
             try:
-                summoner_id = entry['summonerId']
-                summoner = WATCHER.summoner.by_id(PLATFORM_ID, summoner_id)
-                puuid = summoner['puuid']
+                # GREAT NEWS: puuid is already in the entry!
+                puuid = entry.get('puuid')
                 
-                # Pull more matches per player
+                if not puuid:
+                    print(f"⚠️ Skipping player {i}: No PUUID found.")
+                    continue
+                
+                # We go straight to fetching matches!
                 player_matches = WATCHER.match.matchlist_by_puuid(
                     REGIONAL_ROUTING, puuid, count=matches_per_player
                 )
-                all_match_ids.update(player_matches)
+                
+                if player_matches:
+                    all_match_ids.update(player_matches)
                 
                 if (i + 1) % 5 == 0:
-                    print(f"  > Progress: {i+1}/{len(players)} players searched. Unique matches found: {len(all_match_ids)}")
+                    print(f"  > Progress: {i+1}/{len(players)} players searched. Unique matches: {len(all_match_ids)}")
                 
-                # Respect rate limits (Dev keys are very sensitive)
+                # Still sleep to respect Match-V5 rate limits
                 time.sleep(1.2) 
                 
             except ApiError as e:
-                print(f"  ! Skipping player {i}: {e}")
+                print(f"  ! Skipping player {i} due to API Error: {e}")
                 continue
                 
     except ApiError as err:
         print(f"❌ Critical API Error: {err}")
         
     return list(all_match_ids)
+
 
 def process_match_data(match_id):
     try:
