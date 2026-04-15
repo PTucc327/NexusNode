@@ -1,9 +1,13 @@
+from networkx import nodes
 import pandas as pd
 from itertools import combinations
 import json
 
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
 # 1. Load the raw data
-df = pd.read_csv('league_match_data.csv')
+df = pd.read_csv('cleaned_league_match_data.csv')
 
 def generate_graph_data(df):
     print("Processing nodes (Champion Stats)...")
@@ -46,7 +50,19 @@ def generate_graph_data(df):
     # Group them into a dictionary: { "TOP": ["Aatrox", "Camille"], "JUNGLE": [...] }
     role_mapping = meta_only.groupby('role')['champion_name'].apply(list).to_dict()
     
-    # --- STEP 4: SAVE FILES ---
+    # --- STEP 4: PCA FOR VISUALIZATION ---
+    
+    #Need to scale the features before performing PCA, otherwise the model will be dominated by features with larger ranges (like gold)
+    features = ['avg_kills', 'avg_deaths', 'avg_assists', 'avg_damage', 'avg_gold']
+    scaler = StandardScaler()
+    nodes[features] = scaler.fit_transform(nodes[features])
+    pca = PCA(n_components=2)
+    nodes_pca = pca.fit_transform(nodes[features])
+    nodes['pca_x'] = nodes_pca[:, 0]
+    nodes['pca_y'] = nodes_pca[:, 1]
+    print(f"Total variance captured: {sum(pca.explained_variance_ratio_):.2%}")
+
+    # --- STEP 5: SAVE FILES ---
     nodes.to_csv('champion_nodes.csv', index=False)
     edge_weights.to_csv('champion_edges.csv', index=False)
     
