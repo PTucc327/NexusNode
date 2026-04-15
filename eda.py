@@ -16,7 +16,7 @@ print(df.describe())
 print('Missing Values:')
 print(df.isna().sum()/len(df))
 df = df.dropna(subset=['role'])
-
+df = df[df['role']!= '']
 print('Missing Values after dropping NA:')
 
 print(df.isna().sum())
@@ -34,6 +34,7 @@ sns.countplot(data=df, x='role', order=df['role'].value_counts().index)
 plt.title('Distribution of Roles')
 plt.xlabel('Role')
 plt.ylabel('Count')
+plt.tight_layout()
 plt.show()
 
 #Top 20 Most Played Champions
@@ -65,6 +66,7 @@ sns.histplot(df['gold_earned'], bins=30, kde=True)
 plt.title('Distribution of Gold Earned')
 plt.xlabel('Gold Earned')
 plt.ylabel('Frequency')
+plt.tight_layout()
 plt.show()
 
 # Damage to Champions Distribution
@@ -73,6 +75,7 @@ sns.histplot(df['damage_to_champs'], bins=30, kde=True)
 plt.title('Distribution of Damage to Champions')
 plt.xlabel('Damage to Champions')
 plt.ylabel('Frequency')
+plt.tight_layout()
 plt.show()
 
 # Kills vs Deaths
@@ -82,6 +85,7 @@ plt.title('Kills vs Deaths by Role')
 plt.xlabel('Kills')
 plt.ylabel('Deaths')
 plt.legend(title='Role')
+plt.tight_layout()
 plt.show()
 
 
@@ -90,6 +94,13 @@ numeric_cols = ['kills', 'deaths', 'assists', 'damage_to_champs', 'gold_earned']
 corr_matrix = df[numeric_cols].corr()
 plt.figure(figsize=(8,6))
 sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1)
+plt.xticks(rotation=45)
+plt.yticks(rotation=45)
 plt.title('Correlation Matrix of Numeric Features')
+plt.tight_layout()
 plt.show()
 
+
+
+#Save cleaned data
+df.to_csv('cleaned_league_match_data.csv', index=False)
