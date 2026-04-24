@@ -30,3 +30,6 @@ Thumbs.db
 # (Optional: Only ignore if your data contains private info. 
 # Keep it if you want the public to see your sample data/resume)
 .data/
+*.csv
+*.pt
+*.json
