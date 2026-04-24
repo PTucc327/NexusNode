@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_geometric.nn import GCNConv
+from torch_geometric.utils import negative_sampling
 from sklearn.preprocessing import StandardScaler
 
 # 1. LOAD DATA
@@ -16,7 +17,7 @@ id_to_champ = {i: name for name, i in champ_to_id.items()}
 
 # 3. PREPARE FEATURES (With Scaling)
 # Machine learning models hate raw numbers like "15000 gold" mixed with "5 kills"
-features = nodes_df[['avg_kills', 'avg_deaths', 'avg_assists', 'avg_damage', 'avg_gold']].values
+features = nodes_df[['pca_x', 'pca_y']].values
 scaler = StandardScaler()
 features_scaled = scaler.fit_transform(features)
 x = torch.tensor(features_scaled, dtype=torch.float)
@@ -42,24 +43,32 @@ class NexusGNN(torch.nn.Module):
         x = self.conv2(x, edge_index)
         return x
 
-model = NexusGNN(num_features=5, embedding_size=64)
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+model = NexusGNN(num_features=2, embedding_size=64)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
 
 # 6. THE TRAINING LOOP (This is the missing "Learning" part)
 # We train the model to make sure teammates have similar vectors
 model.train()
-for epoch in range(100): # 100 rounds of learning
+for epoch in range(501): 
     optimizer.zero_grad()
     z = model(x, edge_index)
     
-    # We want the dot product of connected nodes to be high
-    # This is a basic "Link Prediction" loss
+    # 1. Positive Samples (Actual winning teammates)
     edge_pos_score = (z[edge_index[0]] * z[edge_index[1]]).sum(dim=1)
-    loss = -torch.log(torch.sigmoid(edge_pos_score)).mean()
+    pos_loss = -torch.log(torch.sigmoid(edge_pos_score) + 1e-15).mean()
+    
+    # 2. Negative Samples (Champions who didn't play together)
+    # This generates random edges that DON'T exist in your edge_index
+    neg_edge_index = negative_sampling(edge_index, num_nodes=z.size(0))
+    edge_neg_score = (z[neg_edge_index[0]] * z[neg_edge_index[1]]).sum(dim=1)
+    neg_loss = -torch.log(1 - torch.sigmoid(edge_neg_score) + 1e-15).mean()
+    
+    # 3. Combined Loss
+    loss = pos_loss + neg_loss
     
     loss.backward()
     optimizer.step()
-    if epoch % 20 == 0:
+    if epoch % 50 == 0:
         print(f"Epoch {epoch} | Loss: {loss.item():.4f}")
 
 # 7. SAVE TRAINED EMBEDDINGS
