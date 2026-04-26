@@ -16,7 +16,6 @@ champ_to_id = {name: i for i, name in enumerate(nodes_df['champion_name'])}
 id_to_champ = {i: name for name, i in champ_to_id.items()}
 
 # 3. PREPARE FEATURES (With Scaling)
-# Machine learning models hate raw numbers like "15000 gold" mixed with "5 kills"
 features = nodes_df[['pca_x', 'pca_y']].values
 scaler = StandardScaler()
 features_scaled = scaler.fit_transform(features)
@@ -44,38 +43,45 @@ class NexusGNN(torch.nn.Module):
         return x
 
 model = NexusGNN(num_features=2, embedding_size=64)
-optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
 
-# 6. THE TRAINING LOOP (This is the missing "Learning" part)
-# We train the model to make sure teammates have similar vectors
-model.train()
-for epoch in range(501): 
+# ADJUSTMENT: Lower learning rate and higher weight_decay to prevent clumping
+optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-4)
+
+# 6. THE TRAINING LOOP
+for epoch in range(1001): 
+    model.train()
     optimizer.zero_grad()
     z = model(x, edge_index)
     
     # 1. Positive Samples (Actual winning teammates)
-    edge_pos_score = (z[edge_index[0]] * z[edge_index[1]]).sum(dim=1)
-    pos_loss = -torch.log(torch.sigmoid(edge_pos_score) + 1e-15).mean()
+    # Binary Cross Entropy with Logits for similarity
+    pos_score = (z[edge_index[0]] * z[edge_index[1]]).sum(dim=-1)
+    pos_loss = -torch.log(torch.sigmoid(pos_score) + 1e-15).mean()
     
     # 2. Negative Samples (Champions who didn't play together)
-    # This generates random edges that DON'T exist in your edge_index
-    neg_edge_index = negative_sampling(edge_index, num_nodes=z.size(0))
-    edge_neg_score = (z[neg_edge_index[0]] * z[neg_edge_index[1]]).sum(dim=1)
-    neg_loss = -torch.log(1 - torch.sigmoid(edge_neg_score) + 1e-15).mean()
-    
-    # 3. Combined Loss
-    loss = pos_loss + neg_loss
+    # We generate MORE negative samples than positive ones to force separation
+    neg_edge_index = negative_sampling(edge_index, num_nodes=z.size(0), num_neg_samples=edge_index.size(1) * 2)
+    neg_score = (z[neg_edge_index[0]] * z[neg_edge_index[1]]).sum(dim=-1)
+    neg_loss = -torch.log(1 - torch.sigmoid(neg_score) + 1e-15).mean()
+
+    # ADJUSTMENT: Increase negative weight to 3.0 to "unfold" the space
+    loss = pos_loss + (3.0 * neg_loss)
     
     loss.backward()
     optimizer.step()
-    if epoch % 50 == 0:
-        print(f"Epoch {epoch} | Loss: {loss.item():.4f}")
+    
+    if epoch % 100 == 0:
+        # Debugging: Monitor similarity between two random nodes to ensure it's not 1.0
+        with torch.no_grad():
+            sample_sim = F.cosine_similarity(z[0].unsqueeze(0), z[1].unsqueeze(0)).item()
+        print(f"Epoch {epoch:4d} | Loss: {loss.item():.4f} | Sample Sim: {sample_sim:.4f}")
 
 # 7. SAVE TRAINED EMBEDDINGS
 model.eval()
 with torch.no_grad():
     final_embeddings = model(x, edge_index)
 
+# Convert to standard float to avoid Streamlit float32 errors later
 champion_embeddings = {id_to_champ[i]: final_embeddings[i].numpy() for i in range(len(nodes_df))}
 torch.save(champion_embeddings, 'champion_embeddings.pt')
-print("✅ Brain Trained & Saved!")
+print("✅ Brain Trained & Saved with Spread-Optimization!")
