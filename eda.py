@@ -5,7 +5,7 @@ import seaborn as sns
 
 
 #1. Load data
-df = pd.read_csv('league_match_data.csv')
+df = pd.read_csv('league_match_data.csv', on_bad_lines='skip')
 print(df.head())
 
 
@@ -26,6 +26,12 @@ print(df['role'].value_counts())
 
 df['role'] = df['role'].replace('UTILITY', 'SUPPORT')
 print(df['role'].value_counts())
+
+#Check if gold/damage correlation differs by region
+for region in df['region'].unique():
+    region_df = df[df['region'] == region]
+    corr = region_df['gold_earned'].corr(region_df['damage_to_champs'])
+    print(f"Region: {region} | Gold-Damage Correlation: {corr:.3f}")
 
 #4. Visualizations
 # Role Distribution
@@ -58,6 +64,29 @@ plt.title('Top 20 Most Played Champions by Role')
 plt.xlabel('Number of Games')
 plt.ylabel('Champion Name')
 plt.tight_layout() # Adjusts layout to fit labels
+plt.show()
+
+# Top champions by win rate
+champion_win_rates = df.groupby('champion_name')['win'].mean().sort_values(ascending=False).head(20)
+plt.figure(figsize=(12, 8))
+sns.barplot(x=champion_win_rates.values, y=champion_win_rates.index, palette='magma', hue=champion_win_rates.values, dodge=False)
+plt.title('Top 20 Champions by Win Rate')
+plt.xlabel('Win Rate')
+plt.ylabel('Champion Name')
+plt.tight_layout()
+plt.show()
+
+#Top champions by region
+champion_region_win_rates = df.groupby(['champion_name', 'region'])['win'].mean().reset_index()
+top_champions = champion_region_win_rates.groupby('champion_name')['win'].mean().sort_values(ascending=False).head(20).index
+top_champion_region_win_rates = champion_region_win_rates[champion_region_win_rates['champion_name'].isin(top_champions)]
+plt.figure(figsize=(12, 8))
+sns.barplot(x='win', y='champion_name', hue='region', data=top_champion_region_win_rates, palette='Set2')
+plt.title('Top 20 Champions by Win Rate Across Regions')
+plt.xlabel('Win Rate')
+plt.ylabel('Champion Name')
+plt.legend(title='Region')
+plt.tight_layout()
 plt.show()
 
 # Gold Earned Distribution
@@ -104,3 +133,4 @@ plt.show()
 
 #Save cleaned data
 df.to_csv('cleaned_league_match_data.csv', index=False)
+df.groupby('role')['champion_name'].unique().to_json('champion_roles.json')
