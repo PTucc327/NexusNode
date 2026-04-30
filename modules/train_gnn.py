@@ -8,8 +8,8 @@ from torch_geometric.utils import negative_sampling
 from sklearn.preprocessing import StandardScaler
 
 # 1. LOAD DATA
-nodes_df = pd.read_csv('champion_nodes.csv')
-edges_df = pd.read_csv('champion_edges.csv')
+nodes_df = pd.read_csv('./data/champion_nodes.csv')
+edges_df = pd.read_csv('./data/champion_edges.csv')
 
 # 2. MAP IDs
 champ_to_id = {name: i for i, name in enumerate(nodes_df['champion_name'])}
@@ -83,5 +83,5 @@ with torch.no_grad():
 
 # Convert to standard float to avoid Streamlit float32 errors later
 champion_embeddings = {id_to_champ[i]: final_embeddings[i].numpy() for i in range(len(nodes_df))}
-torch.save(champion_embeddings, 'champion_embeddings.pt')
+torch.save(champion_embeddings, './data/champion_embeddings.pt')
 print("✅ Brain Trained & Saved with Spread-Optimization!")

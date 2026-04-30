@@ -7,7 +7,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 # 1. Load the raw data
-df = pd.read_csv('cleaned_league_match_data.csv')
+df = pd.read_csv('./data/cleaned_league_match_data.csv')
 
 def generate_graph_data(df):
     print("Processing nodes (Champion Stats)...")
@@ -63,11 +63,11 @@ def generate_graph_data(df):
     print(f"Total variance captured: {sum(pca.explained_variance_ratio_):.2%}")
 
     # --- STEP 5: SAVE FILES ---
-    nodes.to_csv('champion_nodes.csv', index=False)
-    edge_weights.to_csv('champion_edges.csv', index=False)
+    nodes.to_csv('./data/champion_nodes.csv', index=False)
+    edge_weights.to_csv('./data/champion_edges.csv', index=False)
     
     # Save the role mapping using the standard json library
-    with open('champion_roles.json', 'w') as f:
+    with open('./data/champion_roles.json', 'w') as f:
         json.dump(role_mapping, f)
         
     print(f"Done! Created {len(nodes)} nodes, {len(edge_weights)} edges, and saved role roles.")

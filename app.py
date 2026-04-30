@@ -6,7 +6,8 @@ import os
 import requests
 from dotenv import load_dotenv
 from sklearn.metrics.pairwise import cosine_similarity
-from riot_api import RiotInterface, get_champ_name_map
+from NexusNode.modules.engine import get_detailed_reasoning
+from NexusNode.modules.riot_api import RiotInterface, get_champ_name_map
 
 # --- 1. SECURITY & ENVIRONMENT ---
 load_dotenv()
@@ -144,13 +145,15 @@ if st.button("🚀 EXECUTE TACTICAL SYNTHESIS", type="primary", use_container_wi
     else:
         st.write(f"### Predicted Optimal {user_role} Picks")
         res_cols = st.columns(5)
+
         for i, (name, final_val) in enumerate(results):
             with res_cols[i]:
+                # Get the reason from our new module
+                reason =  get_detailed_reasoning(name, [a1, a2, a3, a4], embeddings)
+                
                 is_comfort = "⭐" if name in my_comfort else ""
-                st.metric(
-                    label=f"Rank {i+1} {is_comfort}", 
-                    value=name, 
-                    delta=f"{final_val:.3f}",
-                    delta_color="off"
-                )
+                st.metric(label=f"Rank {i+1} {is_comfort}", value=f"{final_val:.3f}", delta=name)
+                
+                # Display the explanation in a subtle way
+                st.caption(f"💡 {reason}")
                 st.progress(max(0.0, min(1.0, float(final_val))))
