@@ -1,13 +1,13 @@
-name: Weekly Data Refresh
+name: Weekly Data and Model Refresh
 
 on:
   schedule:
     # Runs at 00:00 every Monday (UTC)
     - cron: '0 0 * * 1'
-  workflow_dispatch: # Allows you to run it manually from the "Actions" tab
+  workflow_dispatch: # Allows manual trigger
 
 jobs:
-  scrape:
+  pipeline:
     runs-on: ubuntu-latest
 
     steps:
@@ -18,22 +18,38 @@ jobs:
       uses: actions/setup-python@v4
       with:
         python-version: '3.10'
+        cache: 'pip' # Speeds up the run by caching dependencies
 
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
+        # Ensure your requirements.txt includes: torch, pandas, numpy, etc.
         pip install -r requirements.txt
 
-    - name: Run Scraper
-    # We pass the secret API key from GitHub to our environment
+    - name: 1. Run Scraper (Raw Data)
       env:
         RIOT_KEY: ${{ secrets.RIOT_KEY }}
       run: python modules/collect_data.py
 
-    - name: Commit and Push Data
+    - name: 2. Run EDA (Cleaning & Role Fixes)
+      run: python modules/eda.py
+
+    - name: 3. Run Preprocessing (Graph Construction)
+      run: python modules/preprocess.py
+
+    - name: 4. Run GNN Training (Embeddings)
+      run: python modules/train_gnn.py
+
+    - name: Commit and Push All Changes
       run: |
         git config --global user.name "NexusNode-Bot"
         git config --global user.email "bot@nexusnode.ai"
+        
+        # Add the raw data, the processed data, and the final model weights
         git add data/raw/league_match_data.csv
-        git commit -m "Automated Weekly Data Refresh [skip ci]" || echo "No changes to commit"
+        git add data/processed/cleaned_league_match_data.csv
+        git add data/processed/champion_roles.json
+        git add champion_embeddings.pt
+        
+        git commit -m "🚀 Automated Pipeline: Scrape, Clean, & Retrain [skip ci]" || echo "No changes to commit"
         git push
