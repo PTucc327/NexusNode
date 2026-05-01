@@ -1,8 +1,11 @@
 streamlit
 torch
 torchvision
+torch-geometric
 numpy
 requests
 python-dotenv
 scikit-learn
 pandas
+matplotlib
+seaborn
