@@ -48,5 +48,5 @@ jobs:
         # Add the raw data, the processed data, and the final model weights
         git add data/
         
-        git commit -m "🚀 Automated Pipeline: Scrape, Clean, & Retrain [skip ci]" || echo "No changes to commit"
+        git commit -m "🚀 Automated Pipeline: Scrape, Clean, & Retrain" || echo "No changes to commit"
         git push
