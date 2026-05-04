@@ -49,7 +49,7 @@ jobs:
         git add data/raw/league_match_data.csv
         git add data/processed/cleaned_league_match_data.csv
         git add data/processed/champion_roles.json
-        git add champion_embeddings.pt
+        git add data/processed/champion_embeddings.pt
         
         git commit -m "🚀 Automated Pipeline: Scrape, Clean, & Retrain [skip ci]" || echo "No changes to commit"
         git push
