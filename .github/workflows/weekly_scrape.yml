@@ -46,10 +46,7 @@ jobs:
         git config --global user.email "bot@nexusnode.ai"
         
         # Add the raw data, the processed data, and the final model weights
-        git add data/raw/league_match_data.csv
-        git add data/processed/cleaned_league_match_data.csv
-        git add data/processed/champion_roles.json
-        git add champion_embeddings.pt
+        git add data/
         
         git commit -m "🚀 Automated Pipeline: Scrape, Clean, & Retrain [skip ci]" || echo "No changes to commit"
         git push
