@@ -1,16 +1,27 @@
+import numpy
 import numpy as np
 import torch
 import json
 import os
 from sklearn.metrics.pairwise import cosine_similarity
 
+torch.serialization.add_safe_globals([
+    numpy._core.multiarray._reconstruct, 
+    numpy.ndarray,
+    numpy.dtype,
+    numpy.dtypes.Float32DType
+])
 class DraftingEngine:
-    def __init__(self, embeddings_path='./champion_embeddings.pt', roles_path='./data/processed/champion_roles.json'):
+    def __init__(self, embeddings_path='./data/processed/champion_embeddings.pt', roles_path='./data/processed/champion_roles.json'):
         self.embeddings = self._load_pt(embeddings_path)
         self.roles_map = self._load_json(roles_path)
 
     def _load_pt(self, path):
-        return torch.load(path) if os.path.exists(path) else {}
+        if os.path.exists(path):
+            # 2. UPDATE THIS LINE
+            # weights_only=True is the new secure default for PyTorch 2.6
+            return torch.load(path, weights_only=True)
+        return {}
 
     def _load_json(self, path):
         if os.path.exists(path):

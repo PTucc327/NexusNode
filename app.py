@@ -21,7 +21,7 @@ def init_engine():
     try:
         # Note: adjust these paths if your file structure differs on your server
         engine = DraftingEngine(
-            embeddings_path='champion_embeddings.pt', 
+            embeddings_path='data/processed/champion_embeddings.pt', 
             roles_path='data/processed/champion_roles.json'
         )
         # Extract champion list for the dropdowns
@@ -124,7 +124,7 @@ if st.button("🚀 EXECUTE TACTICAL SYNTHESIS", type="primary", use_container_wi
                     reason = engine.get_reasoning(name, [a1, a2, a3, a4])
                     
                     is_comfort = "⭐" if name in my_comfort else ""
-                    st.metric(label=f"Rank {i+1} {is_comfort}", value=f"{final_val:.3f}", delta=name)
+                    st.metric(label=f"Rank {i+1} {is_comfort}", value=name, delta=f"{final_val:.3f}")
                     
                     st.caption(f"💡 {reason}")
                     # Progress normalized assuming similarity stays between 0 and 1
