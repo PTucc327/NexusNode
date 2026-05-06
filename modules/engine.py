@@ -18,8 +18,6 @@ class DraftingEngine:
 
     def _load_pt(self, path):
         if os.path.exists(path):
-            # 2. UPDATE THIS LINE
-            # weights_only=True is the new secure default for PyTorch 2.6
             return torch.load(path, weights_only=True)
         return {}
 
