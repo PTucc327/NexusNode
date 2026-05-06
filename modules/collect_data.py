@@ -131,6 +131,6 @@ if __name__ == "__main__":
             if batch_data:
                 df_final = pd.DataFrame(batch_data)
                 file_exists = os.path.isfile(RAW_DATA_PATH)
-                df_final.to_csv(RAW_DATA_PATH, mode='w', index=False, header=not file_exists)
+                df_final.to_csv(RAW_DATA_PATH, mode='a', index=False, header=not file_exists)
         
         print(f"✨ Automation Cycle Complete. Data stored in {RAW_DATA_PATH}")
