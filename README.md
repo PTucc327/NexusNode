@@ -2,7 +2,7 @@
 NexusNode is an automated MLOps pipeline and recommendation engine that uses Graph Neural Networks (GNN) to optimize team compositions in League of Legends. By analyzing high-Elo match data from multiple global regions, it maps champion synergies into a 64-dimensional vector space to provide real-time drafting intelligence.
 
 
-![Application](./images/userinterface.png)
+![Application](./images/UserInterface.png)
 ---
 
 ## 💼 Business Impact & Problem Statement
