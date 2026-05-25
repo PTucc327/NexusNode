@@ -6,6 +6,9 @@ on:
     - cron: '0 0 * * 1'
   workflow_dispatch: # Allows manual trigger
 
+permissions:
+  contents: write
+  
 jobs:
   pipeline:
     runs-on: ubuntu-latest
@@ -45,8 +48,14 @@ jobs:
         git config --global user.name "NexusNode-Bot"
         git config --global user.email "bot@nexusnode.ai"
         
-        # Add the raw data, the processed data, and the final model weights
+        # Track data changes AND model weight file changes
         git add data/
+        git add *.pt 2>/dev/null || true 
         
-        git commit -m "🚀 Automated Pipeline: Scrape, Clean, & Retrain [skip ci]" || echo "No changes to commit"
-        git push
+        # Commit only if there are actual modifications
+        if [ -n "$(git status --porcelain)" ]; then
+          git commit -m "🚀 Automated Pipeline: Scrape, Clean, & Retrain [skip ci]"
+          git push
+        else
+          echo "No changes detected. Workspace is clean."
+        fi
