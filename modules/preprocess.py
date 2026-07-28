@@ -68,11 +68,24 @@ def generate_graph_data():
         mask = (share > MIN_ROLE_SHARE) & (role_counts[role] >= MIN_ROLE_GAMES)
         role_mapping[role] = role_counts.index[mask].tolist()
     
-    # --- STEP 4: PCA FOR VISUALIZATION ---
-    features = ['avg_kills', 'avg_deaths', 'avg_assists', 'avg_damage', 'avg_gold']
+    # --- STEP 4: FEATURE SCALING ---
+    # Include win_rate alongside the combat stats -- it's a meaningful signal
+    # about a champion's current power level that was previously computed but
+    # never actually fed into anything.
+    features = ['avg_kills', 'avg_deaths', 'avg_assists', 'avg_damage', 'avg_gold', 'win_rate']
     scaler = StandardScaler()
     scaled_features = scaler.fit_transform(nodes[features])
-    
+
+    # Save ALL scaled features as the GNN's node input (feat_0..feat_5).
+    # Previously these were compressed down to a 2D PCA projection *before*
+    # being handed to the GNN, which throws away most of the signal --
+    # PCA's job here should only be to produce a 2D projection for plotting,
+    # not to be the model's actual input. Let the GCN layers do the
+    # dimensionality reduction/embedding themselves from the full feature set.
+    for i, feat_name in enumerate(features):
+        nodes[f'feat_{feat_name}'] = scaled_features[:, i]
+
+    # --- STEP 4b: PCA FOR VISUALIZATION ONLY (not model input) ---
     pca = PCA(n_components=2)
     nodes_pca = pca.fit_transform(scaled_features)
     nodes['pca_x'] = nodes_pca[:, 0]

@@ -1,12 +1,10 @@
 import pandas as pd
 import os
-import json
 
 def clean_data():
     # Define paths based on your new directory structure
     input_path = './data/raw/league_match_data.csv'
     output_path = './data/processed/cleaned_league_match_data.csv'
-    roles_path = './data/processed/champion_roles.json'
 
     if not os.path.exists(input_path):
         print(f"❌ Error: {input_path} not found. Ensure collector has run.")
@@ -26,16 +24,18 @@ def clean_data():
     # 3. Save Cleaned Data for the GNN Trainer
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     df.to_csv(output_path, index=False)
-    
-    # 4. Update UI Metadata (champion_roles.json)
-    # This keeps your Streamlit dropdowns accurate to the current patch
-    role_grouping = df.groupby('role')['champion_name'].unique().apply(list).to_dict()
-    with open(roles_path, 'w') as f:
-        json.dump(role_grouping, f)
+
+    # NOTE: champion_roles.json is intentionally NOT written here anymore.
+    # A prior version wrote an unfiltered role mapping (any champ who ever
+    # played a role, even once, qualified) which got overwritten later by
+    # preprocess.py's properly-thresholded version -- but only because of
+    # pipeline ordering. That made preprocess.py's output fragile: running
+    # eda.py on its own (or reordering the pipeline) silently regenerated
+    # the broken, unfiltered file. preprocess.py is now the single owner
+    # of champion_roles.json.
 
     print(f"✨ Data Science Transformation Complete.")
     print(f"   - Processed {len(df)} valid match-player rows.")
-    print(f"   - Roles updated: {list(role_grouping.keys())}")
 
 if __name__ == '__main__':
     clean_data()

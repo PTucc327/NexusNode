@@ -68,7 +68,15 @@ class DraftingEngine:
                 base_sim = cosine_similarity(team_centroid, champ_vec)[0][0]
                 
                 # Apply Loyalty Bonus
-                final_score = base_sim * loyalty_boost if champ in comfort_pool else base_sim
+                # NOTE: cosine similarity can be negative here, so a naive
+                # `base_sim * loyalty_boost` would make comfort picks with a
+                # negative fit score WORSE instead of better. Boost additively
+                # instead, scaled by the magnitude of the base score, so the
+                # bonus always pushes the score in the favorable direction.
+                if champ in comfort_pool:
+                    final_score = base_sim + (loyalty_boost - 1) * abs(base_sim)
+                else:
+                    final_score = base_sim
                 scores.append((champ, final_score))
         
         return sorted(scores, key=lambda x: x[1], reverse=True)[:5]

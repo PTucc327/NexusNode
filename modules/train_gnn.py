@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_geometric.nn import GCNConv
 from torch_geometric.utils import negative_sampling
-from sklearn.preprocessing import StandardScaler
 import os
 
 # 1. LOAD DATA (Updated to use the 'processed' folder)
@@ -28,10 +27,21 @@ def train_model():
     id_to_champ = {i: name for name, i in champ_to_id.items()}
 
     # 3. PREPARE FEATURES
-    features = nodes_df[['pca_x', 'pca_y']].values
-    scaler = StandardScaler()
-    features_scaled = scaler.fit_transform(features)
-    x = torch.tensor(features_scaled, dtype=torch.float)
+    # Use the full scaled feature set (feat_*) that preprocess.py produces,
+    # rather than the 2D PCA projection (pca_x/pca_y). The PCA columns are
+    # meant for visualization only -- collapsing to 2 dimensions before the
+    # GNN even sees the data threw away most of the signal (kills, deaths,
+    # assists, damage, gold, win_rate) that the GCN layers could otherwise
+    # learn useful structure from. preprocess.py already applies
+    # StandardScaler, so no need to re-scale here.
+    feature_cols = [c for c in nodes_df.columns if c.startswith('feat_')]
+    if not feature_cols:
+        raise ValueError(
+            "No 'feat_*' columns found in champion_nodes.csv. "
+            "Re-run preprocess.py to regenerate it with the updated schema."
+        )
+    features = nodes_df[feature_cols].values
+    x = torch.tensor(features, dtype=torch.float)
 
     # 4. PREPARE EDGES
     edge_list = []
@@ -55,7 +65,7 @@ def train_model():
             x = self.conv2(x, edge_index)
             return x
 
-    model = NexusGNN(num_features=2, embedding_size=64)
+    model = NexusGNN(num_features=x.shape[1], embedding_size=64)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-4)
 
     # 6. TRAINING LOOP
