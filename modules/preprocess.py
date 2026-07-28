@@ -50,10 +50,23 @@ def generate_graph_data():
 
     print("Cleaning Role Mapping...")
     # --- STEP 3: ROLE MAPPING ---
-    role_counts = df.groupby(['role', 'champion_name']).size().reset_index(name='count')
-    # Filter meta: Champ must appear in role at least 2 times
-    meta_only = role_counts[role_counts['count'] >= 2]
-    role_mapping = meta_only.groupby('role')['champion_name'].apply(list).to_dict()
+    # Count games per (champion, role) and total games per champion
+    role_counts = df.groupby(['champion_name', 'role']).size().unstack(fill_value=0)
+    total_games = role_counts.sum(axis=1)
+
+    # A champ is "eligible" for a role only if:
+    #   (a) that role makes up a meaningful share of their games (>15%), AND
+    #   (b) there's enough sample size to trust it (>=10 games in that role)
+    # This filters out one-off troll picks / autofills (e.g. Aatrox bot,
+    # Ezreal support) that an absolute ">=2 games" threshold let through.
+    MIN_ROLE_SHARE = 0.15
+    MIN_ROLE_GAMES = 10
+
+    role_mapping = {}
+    for role in role_counts.columns:
+        share = role_counts[role] / total_games
+        mask = (share > MIN_ROLE_SHARE) & (role_counts[role] >= MIN_ROLE_GAMES)
+        role_mapping[role] = role_counts.index[mask].tolist()
     
     # --- STEP 4: PCA FOR VISUALIZATION ---
     features = ['avg_kills', 'avg_deaths', 'avg_assists', 'avg_damage', 'avg_gold']

@@ -12,7 +12,9 @@ import os
 def train_model():
     nodes_path = './data/processed/champion_nodes.csv'
     edges_path = './data/processed/champion_edges.csv'
-    output_path = './champion_embeddings.pt' # Keep in root for app.py to find easily
+    # NOTE: app.py loads embeddings from 'data/processed/champion_embeddings.pt',
+    # so this must be saved there too or the app silently keeps using stale embeddings.
+    output_path = './data/processed/champion_embeddings.pt'
 
     if not os.path.exists(nodes_path) or not os.path.exists(edges_path):
         print("❌ Error: Processed graph data not found. Run preprocess.py first.")
