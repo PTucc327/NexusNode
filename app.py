@@ -22,7 +22,8 @@ def init_engine():
         # Note: adjust these paths if your file structure differs on your server
         engine = DraftingEngine(
             embeddings_path='data/processed/champion_embeddings.pt', 
-            roles_path='data/processed/champion_roles.json'
+            roles_path='data/processed/champion_roles.json',
+            matchups_path='data/processed/champion_matchups.csv'
         )
         # Extract champion list for the dropdowns
         champ_list = sorted(list(engine.embeddings.keys()))
@@ -64,9 +65,15 @@ with st.sidebar:
     st.divider()
     st.subheader("🎯 Personalization")
     comfort_boost = st.slider("Loyalty Bonus", 1.0, 1.5, 1.10, step=0.05, help="Multiplier for comfort pool (e.g. 1.1 = 10% boost).")
+    enemy_weight = st.slider("Counter-Pick Weight", 0.0, 2.0, 1.0, step=0.1, help="How much real lane matchup history (your role vs the enemy in that same role) should influence the ranking. 0 = ignore matchups entirely.")
     
     # Safe defaults
-    raw_picks = st.session_state.get('comfort_picks', ["Jinx", "Kai'Sa", "Vayne"])
+    # NOTE: champion names throughout the dataset/embeddings/champ_list use
+    # Riot's internal API naming convention (e.g. "Kaisa", not "Kai'Sa"),
+    # matching Data Dragon's `key` field and the match API's `championName`
+    # field. A punctuated "Kai'Sa" here will never match champ_list, so it
+    # silently fails to appear as a pre-selected default every session.
+    raw_picks = st.session_state.get('comfort_picks', ["Jinx", "Kaisa", "Vayne"])
     safe_defaults = [c for c in raw_picks if c in champ_list]
     my_comfort = st.multiselect("Active Comfort Pool", options=champ_list, default=safe_defaults)
 
@@ -77,24 +84,25 @@ st.divider()
 
 col_a, col_v, col_e = st.columns([4, 1, 4])
 options = ["None"] + champ_list
+ROLES = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "SUPPORT"]
+ally_roles = [r for r in ROLES if r != user_role]  # your 4 teammates' roles
 
 with col_a:
     st.subheader("💙 Allies")
-    a1 = st.selectbox("Ally 1", options, key="a1")
-    a2 = st.selectbox("Ally 2", options, key="a2")
-    a3 = st.selectbox("Ally 3", options, key="a3")
-    a4 = st.selectbox("Ally 4", options, key="a4")
+    ally_by_role = {}
+    for r in ally_roles:
+        ally_by_role[r] = st.selectbox(f"Ally ({r.title()})", options, key=f"ally_{r}")
 
 with col_v:
     st.markdown("<h1 style='text-align: center; color: gray; margin-top: 100px;'>VS</h1>", unsafe_allow_html=True)
 
 with col_e:
     st.subheader("❤️ Enemies")
-    e1 = st.selectbox("Enemy 1", options, key="e1")
-    e2 = st.selectbox("Enemy 2", options, key="e2")
-    e3 = st.selectbox("Enemy 3", options, key="e3")
-    e4 = st.selectbox("Enemy 4", options, key="e4")
-    e5 = st.selectbox("Enemy 5", options, key="e5")
+    st.caption("Tagged by role so we can pull real lane matchup data for your lane specifically.")
+    enemy_by_role = {}
+    for r in ROLES:
+        label = f"Enemy ({r.title()})" + (" 🎯 your lane" if r == user_role else "")
+        enemy_by_role[r] = st.selectbox(label, options, key=f"enemy_{r}")
 
 st.divider()
 
@@ -103,25 +111,30 @@ if st.button("🚀 EXECUTE TACTICAL SYNTHESIS", type="primary", use_container_wi
     if not engine:
         st.error("Engine not initialized. Check your model files.")
     else:
+        allies_list = list(ally_by_role.values())
         # Use our engine's new synthesis method
         results = engine.run_synthesis(
             user_role=user_role, 
-            allies=[a1, a2, a3, a4], 
-            enemies=[e1, e2, e3, e4, e5], 
+            allies=allies_list, 
+            enemies=enemy_by_role, 
             comfort_pool=my_comfort, 
-            loyalty_boost=comfort_boost
+            loyalty_boost=comfort_boost,
+            enemy_weight=enemy_weight
         )
         
         if not results:
             st.warning("Please select teammates to generate synergy recommendations.")
         else:
+            lane_opponent = enemy_by_role.get(user_role)
             st.write(f"### Predicted Optimal {user_role} Picks")
+            if lane_opponent and lane_opponent != "None":
+                st.caption(f"Factoring in lane matchup history vs {lane_opponent}")
             res_cols = st.columns(5)
 
             for i, (name, final_val) in enumerate(results):
                 with res_cols[i]:
                     # Using the reasoning logic from the engine
-                    reason = engine.get_reasoning(name, [a1, a2, a3, a4])
+                    reason = engine.get_reasoning(name, allies_list, role=user_role, lane_opponent=lane_opponent)
                     
                     is_comfort = "⭐" if name in my_comfort else ""
                     st.metric(label=f"Rank {i+1} {is_comfort}", value=name, delta=f"{final_val:.3f}")

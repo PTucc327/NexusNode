@@ -11,6 +11,7 @@ def generate_graph_data():
     output_nodes = './data/processed/champion_nodes.csv'
     output_edges = './data/processed/champion_edges.csv'
     output_roles = './data/processed/champion_roles.json'
+    output_matchups = './data/processed/champion_matchups.csv'
 
     if not os.path.exists(input_path):
         print(f"❌ Error: {input_path} not found.")
@@ -18,6 +19,32 @@ def generate_graph_data():
 
     df = pd.read_csv(input_path)
     
+    print("Building Matchup Table (Lane Counters)...")
+    # --- STEP 3b: LANE MATCHUP TABLE ---
+    # For each match+role there are exactly 2 rows (one per team) since each
+    # role is filled by one player per side. Pair them up and record who won
+    # to get a REAL head-to-head win rate per (champion, opponent, role) --
+    # this is actual counter-pick signal, not a guess from embedding distance.
+    matchup_records = []
+    for (match_id, role), group in df.groupby(['match_id', 'role']):
+        if len(group) != 2:
+            continue  # malformed/incomplete match data, skip
+        a, b = group.iloc[0], group.iloc[1]
+        if a['team_id'] == b['team_id']:
+            continue  # guard against bad data (both rows same team)
+        matchup_records.append((a['champion_name'], b['champion_name'], role, a['win']))
+        matchup_records.append((b['champion_name'], a['champion_name'], role, b['win']))
+
+    matchups_df = pd.DataFrame(matchup_records, columns=['champion_name', 'opponent_name', 'role', 'win'])
+    matchup_table = matchups_df.groupby(['champion_name', 'opponent_name', 'role']).agg(
+        games=('win', 'size'),
+        win_rate=('win', 'mean')
+    ).reset_index()
+    # NOTE: sample sizes here are often tiny (median is a single game), so we
+    # deliberately do NOT hard-filter low-sample matchups out. Instead we keep
+    # `games` alongside `win_rate` so the engine can down-weight low-confidence
+    # matchups (e.g. 1 game at 100% win rate) instead of trusting them fully.
+
     print("Processing nodes (Champion Stats)...")
     # --- STEP 1: CREATE NODES ---
     nodes = df.groupby('champion_name').agg({
@@ -95,11 +122,12 @@ def generate_graph_data():
     os.makedirs('./data/processed', exist_ok=True)
     nodes.to_csv(output_nodes, index=False)
     edge_weights.to_csv(output_edges, index=False)
+    matchup_table.to_csv(output_matchups, index=False)
     
     with open(output_roles, 'w') as f:
         json.dump(role_mapping, f)
         
-    print(f"✨ Graph Ready! Nodes: {len(nodes)}, Edges: {len(edge_weights)}")
+    print(f"✨ Graph Ready! Nodes: {len(nodes)}, Edges: {len(edge_weights)}, Matchups: {len(matchup_table)}")
 
 if __name__ == "__main__":
     generate_graph_data()
