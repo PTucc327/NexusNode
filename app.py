@@ -99,6 +99,7 @@ st.markdown("""
 .reasons li.strong { border-left: 3px solid #16a34a; }
 .reasons li.weak { border-left: 3px solid #dc2626; }
 .reasons li.lane { border-left: 3px solid #a855f7; }
+.reasons li.meta { border-left: 3px solid #f59e0b; }
 .pool-row { display:flex; flex-wrap:wrap; gap:4px; margin:.25rem 0 .5rem 0; }
 </style>
 """, unsafe_allow_html=True)
@@ -109,6 +110,7 @@ def reset_draft():
     for r in ROLES:
         st.session_state[f"blue_{r}"] = None
         st.session_state[f"red_{r}"] = None
+    st.session_state["bans"] = []
 
 
 def lock_in(role, champ):
@@ -184,8 +186,8 @@ with st.sidebar:
 
 # --- 7. DRAFT BOARD ---
 st.title("🎮 NexusNode Draft Assistant")
-st.caption("Fill in the picks you know. Recommendations for your role update instantly, "
-           "factoring in your allies' synergy **and** every enemy champion.")
+st.caption("Fill in bans and the picks you know. Recommendations for your role update instantly, "
+           "factoring in role strength, your lane matchup, and the rest of both teams.")
 
 
 def slot_options(role):
@@ -208,6 +210,9 @@ def draft_slot(team, role):
                             placeholder=placeholder)
 
 
+bans = st.multiselect("🚫 Bans", champ_list, key="bans", format_func=name, max_selections=10,
+                      placeholder="Add banned champions (they won't be recommended)…")
+
 col_blue, col_red = st.columns(2, gap="large")
 with col_blue:
     with st.container(border=True):
@@ -221,6 +226,9 @@ with col_red:
 # Duplicate guard: a champion can only be picked once per game
 picked = [c for c in list(blue.values()) + list(red.values()) if c]
 dupes = sorted({c for c in picked if picked.count(c) > 1})
+banned_picks = sorted(set(picked) & set(bans))
+if banned_picks:
+    st.warning(", ".join(name(c) for c in banned_picks) + " is banned but also picked.")
 if dupes:
     st.warning("Each champion can only be picked once per game: "
                + ", ".join(name(c) for c in dupes) + " is selected more than once.")
@@ -241,7 +249,7 @@ if p_now is not None:
 
 # --- 9. RECOMMENDATIONS ---
 allies = {r: c for r, c in blue.items() if r != user_role}
-recs = engine.recommend(user_role, allies, red, comfort_pool=comfort,
+recs = engine.recommend(user_role, allies, red, comfort_pool=comfort, banned=bans,
                         comfort_bonus=comfort_bonus, enemy_weight=enemy_weight)
 
 st.subheader(f"{ROLE_ICONS[user_role]} Best {ROLE_LABELS[user_role]} picks for this draft")
@@ -305,28 +313,34 @@ else:
 # --- 10. ABOUT THE MODEL ---
 with st.expander("🧠 How NexusNode works"):
     st.markdown("""
-A **relational graph neural network** learns a vector for every champion from two kinds of
-relationships seen in high-Elo ranked games: champions played **together** (synergy) and champions
-played **against each other** (counters). It's trained end-to-end to predict which team wins, scoring a
-draft as:
+NexusNode predicts which team wins from the draft, trained on high-Elo Ranked Solo games, and recommends
+the pick that maximizes your team's predicted win probability. A draft is scored from:
 
-- **Power**: each champion's individual strength in the current meta
-- **Synergy**: how well each pair of teammates works together
-- **Counters**: how every one of your champions fares against every enemy champion
-- **Lane matchup**: an extra term for the direct opponent in the same role
+- **Role strength**: how each champion performs *in that specific role*, shrunk toward average when
+  there are few games (so a 12-game off-role pick can't top the list)
+- **Lane matchup**: your champion vs. the enemy in the same role, from observed head-to-head games,
+  again weighted by how many games back it up
+- **Synergy & cross-lane counters**: a relational graph neural network learns these from champions played
+  together and against each other. With the current amount of data these effects are still small; they
+  grow automatically as the weekly pipeline collects more matches.
 
-Recommendations are the picks that maximize your team's predicted win probability.
+Each component was kept only if it improved predictions on held-out matches.
 """)
     m = engine.metrics
     if m:
         v = m.get("validation", {})
-        full, ally_only, base = v.get("full_model", {}), v.get("allies_only_ablation", {}), v.get("baseline_side_only", {})
+        rows = [
+            ("GNN + lane matchup evidence (used)", v.get("full_model_plus_lane_evidence")),
+            ("GNN only", v.get("full_model")),
+            ("GNN without enemy terms (ablation)", v.get("allies_only_ablation")),
+            ("No draft information (side only)", v.get("baseline_side_only")),
+        ]
         st.caption(f"Trained {m.get('trained_at', '?')} on {m.get('matches', '?')} matches, "
-                   f"{m.get('champions', '?')} champions. Held-out validation ({m.get('validation_matches', '?')} matches):")
+                   f"{m.get('champions', '?')} champions. Held-out validation ({m.get('validation_matches', '?')} matches). "
+                   "Lower log loss and higher AUC are better; drafts alone only shift outcomes by a few percent.")
         st.dataframe([
-            {"Model": "Full model (allies + enemies)", "Accuracy": full.get("accuracy"), "AUC": full.get("auc"), "Log loss": full.get("log_loss")},
-            {"Model": "Allies only (ablation)", "Accuracy": ally_only.get("accuracy"), "AUC": ally_only.get("auc"), "Log loss": ally_only.get("log_loss")},
-            {"Model": "No draft info (side only)", "Accuracy": base.get("accuracy"), "AUC": base.get("auc"), "Log loss": base.get("log_loss")},
+            {"Model": label, "Accuracy": r.get("accuracy"), "AUC": r.get("auc"), "Log loss": r.get("log_loss")}
+            for label, r in rows if r
         ], hide_index=True, width="stretch", column_config={
             "Accuracy": st.column_config.NumberColumn(format="%.3f"),
             "AUC": st.column_config.NumberColumn(format="%.3f"),

@@ -52,7 +52,7 @@ def clean_data():
     # NOTE: champion_roles.json is owned by preprocess.py (thresholded role
     # eligibility), so it is intentionally not written here.
 
-    print(f"✨ Data Science Transformation Complete.")
+    print("✨ Data Science Transformation Complete.")
     print(f"   - Processed {len(df)} valid match-player rows ({len(valid_ids)} complete matches, "
           f"{raw_rows - len(df)} raw rows dropped).")
 

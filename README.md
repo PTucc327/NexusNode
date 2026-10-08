@@ -34,14 +34,13 @@ The project is structured as a modular MLOps Pipeline:
 
   - Builds role eligibility and an observed lane-matchup table used as evidence in the UI.
 
-- Learning (train_gnn.py): a relational GNN (one GCN per relation) produces role-aware champion embeddings, trained end-to-end on **match outcomes** through a draft-scoring head:
+- Learning (train_gnn.py):
 
-  - **Power**: each champion's individual strength
-  - **Synergy**: a symmetric bilinear term for every pair of teammates
-  - **Counters**: an antisymmetric bilinear term for **every ally-vs-enemy pair** (all 25), so enemy picks in any role shape the prediction
-  - **Lane matchup**: an extra antisymmetric term for same-role opponents
+  - **Role strength**: a per-(champion, role) term with a Gaussian prior, so small samples are shrunk toward average and a champion's main-role results don't leak into its off-roles.
+  - **Relational GNN** (one GCN per relation) produces champion embeddings feeding ally-synergy (symmetric) and enemy-counter (antisymmetric, all 25 ally-vs-enemy pairs) bilinear terms, trained end-to-end on match outcomes.
+  - **Lane matchup evidence**: observed head-to-head lane results, estimated as residuals against the model with sample-size shrinkage.
 
-  The antisymmetric enemy terms guarantee that swapping the two teams exactly flips the prediction. Hyperparameters are chosen with held-out validation and the model is compared against an allies-only ablation and a no-draft baseline (see `data/processed/model_metrics.json`).
+  Each component is kept only if it improves held-out log loss. With the current ~2.5k matches, cross-validation showed lane matchups are the only pairwise signal that generalizes; observed cross-role counters and teammate synergy made predictions worse, and the GNN's interaction terms are regularized to near zero. They grow as more data arrives.
 
 - Deployment (app.py): A Streamlit draft assistant with champion portraits (Data Dragon), a live win-probability bar, and ranked recommendations explained by their synergy with each ally and their edge/weakness against each enemy.
 
@@ -103,13 +102,13 @@ Held-out validation on 512 matches (2,050 training matches, 172 champions):
 
 | Model | Log loss ↓ | AUC ↑ |
 |---|---|---|
-| **Full model (allies + enemies)** | **0.6879** | **0.542** |
-| Allies-only ablation | 0.6881 | 0.538 |
+| **Role strength + GNN + lane matchup evidence (shipped)** | **0.6864** | **0.553** |
+| Role strength + GNN | 0.6875 | 0.546 |
+| Without enemy terms (ablation) | 0.6875 | 0.546 |
 | No draft information (side bias only) | 0.6904 | 0.500 |
 
-- Embedding size: 8 dimensions + role embeddings, chosen by 3-fold cross-validation with early stopping
-- Including enemy interactions improves over the allies-only model, and both beat the no-draft baseline
-- Draft-only prediction is a low-signal problem (player skill and execution dominate outcomes at Challenger), so the model's job is to rank picks by a few points of win probability, not to call games. Accuracy improves as the weekly pipeline adds more matches.
+- Hyperparameters and shrinkage strengths chosen by 3-fold cross-validation with early stopping.
+- Draft-only prediction is a low-signal problem (player skill and execution dominate at Challenger), so the model's job is to rank picks by a few points of win probability, not to call games. Expect pairwise effects (synergy, cross-lane counters) to become visible as the weekly pipeline grows the dataset.
 
 ![performance](./images/LinkedinPostImage2.png)
 ---

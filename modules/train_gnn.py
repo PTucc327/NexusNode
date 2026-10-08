@@ -48,6 +48,13 @@ PATIENCE = 40
 LR = 3e-3
 WEIGHT_DECAY = 5e-2
 DROPOUT = 0.5
+# Prior std (logit) of a champion's strength in a specific role. Acts as
+# sample-size shrinkage: a 12-game role win rate barely moves its estimate,
+# a 400-game one does. Without it, a champion's results in its main role
+# leaked into every other role it is occasionally played in.
+ROLE_BIAS_SIGMA = 0.1
+LANE_EVIDENCE_SIGMA = 0.1  # prior std (logit) of a lane matchup's effect; CV-chosen
+USE_SHARED_POWER = False  # CV: no gain from it, and it leaks strength across roles
 BLUE_TEAM_ID = 100
 
 INPUT_PATH = './data/processed/cleaned_league_match_data.csv'
@@ -121,6 +128,10 @@ class NexusDraftModel(nn.Module):
     def __init__(self, num_champs, num_features, embed_dim=EMBED_DIM, use_enemy_terms=True):
         super().__init__()
         self.use_enemy_terms = use_enemy_terms
+        self.use_shared_power = USE_SHARED_POWER
+        # Strength of each (champion, role), shrunk toward 0 by bias_penalty()
+        self.role_bias = nn.Embedding(num_champs * len(ROLES), 1)
+        nn.init.zeros_(self.role_bias.weight)
         self.id_embed = nn.Embedding(num_champs, ID_EMBED_DIM)
         self.conv1 = RelationalGCNLayer(num_features + ID_EMBED_DIM, 2 * embed_dim)
         self.conv2 = RelationalGCNLayer(2 * embed_dim, embed_dim)
@@ -148,9 +159,20 @@ class NexusDraftModel(nn.Module):
         h = F.dropout(h, DROPOUT, self.training)
         return self.conv2(h, graph)
 
-    def team_score(self, t):
+    def role_strength(self, ids):
+        """Per-(champion, role) strength for ids [M,5] ordered by ROLES."""
+        roles = torch.arange(len(ROLES))
+        return self.role_bias(ids * len(ROLES) + roles).squeeze(-1).sum(dim=1)
+
+    def bias_penalty(self):
+        """Gaussian prior on role strengths (summed negative log prior)."""
+        return (self.role_bias.weight ** 2).sum() / (2 * ROLE_BIAS_SIGMA ** 2)
+
+    def team_score(self, t, ids):
         """Power + within-team synergy for tokens t [M,5,D]."""
-        power = (t @ self.power).sum(dim=1)
+        power = self.role_strength(ids)
+        if self.use_shared_power:
+            power = power + (t @ self.power).sum(dim=1)
         pair = torch.einsum('mid,de,mje->mij', t, self.synergy_matrix(), t)
         synergy = (pair.sum(dim=(1, 2)) - pair.diagonal(dim1=1, dim2=2).sum(dim=1)) / 2
         return power + synergy
@@ -158,7 +180,7 @@ class NexusDraftModel(nn.Module):
     def forward(self, z, blue, red):
         t_blue = F.dropout(z[blue] + self.role_embed, DROPOUT, self.training)
         t_red = F.dropout(z[red] + self.role_embed, DROPOUT, self.training)
-        logit = self.side_bias + self.team_score(t_blue) - self.team_score(t_red)
+        logit = self.side_bias + self.team_score(t_blue, blue) - self.team_score(t_red, red)
         if self.use_enemy_terms:
             cross = torch.einsum('mid,de,mje->mij', t_blue, self.counter_matrix(), t_red)
             lane = torch.einsum('mid,de,mie->mi', t_blue, self.lane_matrix(), t_red)
@@ -166,7 +188,40 @@ class NexusDraftModel(nn.Module):
         return logit
 
 
-# --- 3. TRAINING -----------------------------------------------------------
+# --- 3. LANE MATCHUP EVIDENCE --------------------------------------------
+# With ~2.5k matches the GNN's interaction terms can't separate pairwise
+# effects from noise (they shrink to ~0). Observed lane matchups CAN, if
+# shrunk by sample size: on held-out matches they improved log loss in every
+# CV fold, while observed cross-role counters and teammate synergy made
+# predictions worse. So lane matchups are estimated directly as residuals
+# against the model, with a Gaussian prior (one Newton step / Laplace):
+#     effect(a beats b in role) = Σ(won - p) / (Σ p(1-p) + 1/σ²)
+# Stored antisymmetrically: effect(b, a, role) = -effect(a, b, role).
+def _lane_pairs(blue_row, red_row):
+    for role in range(len(ROLES)):
+        a, b = blue_row[role], red_row[role]
+        yield ((a, b, role), 1.0) if a <= b else ((b, a, role), -1.0)
+
+
+def lane_evidence(blue, red, y, base_logits, sigma=LANE_EVIDENCE_SIGMA):
+    p = torch.sigmoid(base_logits).numpy()
+    residual, info = y.numpy() - p, p * (1 - p)
+    acc = {}
+    for m, (b, r) in enumerate(zip(blue.tolist(), red.tolist())):
+        for key, sign in _lane_pairs(b, r):
+            stats = acc.setdefault(key, [0.0, 0.0])
+            stats[0] += sign * residual[m]
+            stats[1] += info[m]
+    return {k: res / (inf + 1 / sigma ** 2) for k, (res, inf) in acc.items()}
+
+
+def apply_lane_evidence(blue, red, effects):
+    adj = [sum(sign * effects.get(key, 0.0) for key, sign in _lane_pairs(b, r))
+           for b, r in zip(blue.tolist(), red.tolist())]
+    return torch.tensor(adj, dtype=torch.float)
+
+
+# --- 4. TRAINING -----------------------------------------------------------
 def node_feature_tensor(df, champions):
     nodes, _ = build_node_features(df)
     feats = nodes.set_index('champion_name')[[c for c in nodes.columns if c.startswith('feat_')]]
@@ -188,12 +243,19 @@ def fit(model, x, graph, blue, red, y, epochs, val=None):
     """Trains full-batch. With `val`, early-stops on validation log loss and
     returns (best_epoch, best_metrics); otherwise trains exactly `epochs`."""
     torch.manual_seed(SEED)
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    # role_bias has its own explicit prior (bias_penalty), so no weight decay on it
+    bias_params = list(model.role_bias.parameters())
+    other_params = [p for n, p in model.named_parameters() if not n.startswith('role_bias')]
+    optimizer = torch.optim.Adam([
+        {'params': other_params, 'weight_decay': WEIGHT_DECAY},
+        {'params': bias_params, 'weight_decay': 0.0},
+    ], lr=LR)
     best = (0, None, float('inf'))
     for epoch in range(1, epochs + 1):
         model.train()
         optimizer.zero_grad()
-        loss = F.binary_cross_entropy_with_logits(model(model.embed(x, graph), blue, red), y)
+        loss = F.binary_cross_entropy_with_logits(model(model.embed(x, graph), blue, red), y, reduction='sum')
+        loss = (loss + model.bias_penalty()) / len(y)
         loss.backward()
         optimizer.step()
 
@@ -242,8 +304,25 @@ def train_model():
         best_epoch, metrics = fit(m, x_train, graph_train, blue[train_idx], red[train_idx], y[train_idx],
                                   MAX_EPOCHS, val=val)
         results[name] = {**metrics, 'best_epoch': best_epoch}
+        if use_enemy:
+            full_model = m
         print(f"   {name:22s} | val log loss {metrics['log_loss']:.4f} | acc {metrics['accuracy']:.3f} "
               f"| AUC {metrics['auc']:.3f} | epoch {best_epoch}")
+
+    # Lane evidence estimated on the training split, scored on validation.
+    # (Uses the final-epoch model, so it's compared against that model's own
+    # val score rather than the early-stopped best above.)
+    full_model.eval()
+    with torch.no_grad():
+        z_tr = full_model.embed(x_train, graph_train)
+        base_tr = full_model(z_tr, blue[train_idx], red[train_idx])
+        base_val = full_model(z_tr, *val[:2])
+    effects = lane_evidence(blue[train_idx], red[train_idx], y[train_idx], base_tr)
+    results['full_model_final_epoch'] = evaluate(base_val, val[2])
+    results['full_model_plus_lane_evidence'] = evaluate(base_val + apply_lane_evidence(*val[:2], effects), val[2])
+    for name in ('full_model_final_epoch', 'full_model_plus_lane_evidence'):
+        r = results[name]
+        print(f"   {name:22s} | val log loss {r['log_loss']:.4f} | acc {r['accuracy']:.3f} | AUC {r['auc']:.3f}")
 
     base_rate = y[train_idx].mean()
     const_logits = torch.full_like(val[2], float(torch.logit(base_rate)))
@@ -262,16 +341,22 @@ def train_model():
     model.eval()
     with torch.no_grad():
         z = model.embed(x_all, graph_all)
+        effects = lane_evidence(blue, red, y, model(z, blue, red))
+        lane_keys = sorted(effects)
         artifact = {
-            'format_version': 2,
+            'format_version': 3,
             'champions': champions,
             'roles': ROLES,
             'embeddings': z.clone(),
             'role_embeddings': model.role_embed.detach().clone(),
-            'power': model.power.detach().clone(),
+            'power': model.power.detach().clone() if model.use_shared_power else torch.zeros_like(model.power),
+            'role_strength': model.role_bias.weight.detach().view(len(champions), len(ROLES)).clone(),
             'synergy': model.synergy_matrix().detach().clone(),
             'counter': model.counter_matrix().detach().clone(),
             'lane': model.lane_matrix().detach().clone(),
+            # Lane matchup evidence: rows (champ_a, champ_b, role) with a<=b
+            'lane_evidence_keys': torch.tensor(lane_keys, dtype=torch.long),
+            'lane_evidence': torch.tensor([effects[k] for k in lane_keys], dtype=torch.float),
         }
 
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)

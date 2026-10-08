@@ -28,12 +28,21 @@ REGIONS = {
     'br1': 'americas'
 }
 
+class RiotAuthError(Exception):
+    """Key rejected (401/403). Not an ApiError subclass, so per-player
+    `except ApiError: continue` handlers can't swallow it."""
+
 def call_with_retry(fn, *args, **kwargs):
     """Calls a Riot endpoint, honoring 429 Retry-After instead of dropping data."""
     for attempt in range(MAX_RETRIES):
         try:
             return fn(*args, **kwargs)
         except ApiError as err:
+            if err.response is not None and err.response.status_code in (401, 403):
+                raise RiotAuthError(
+                    f"Riot API rejected the key ({err.response.status_code}). Development keys expire "
+                    "every 24h; set a valid RIOT_KEY (repo secret for the weekly workflow)."
+                ) from err
             if err.response is not None and err.response.status_code == 429 and attempt < MAX_RETRIES - 1:
                 wait = int(err.response.headers.get('Retry-After', 20))
                 print(f"⏳ Rate limited. Sleeping for {wait}s...")
@@ -141,6 +150,7 @@ if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")  # emoji logs on Windows consoles
     if not API_KEY:
         print("❌ RIOT_KEY missing in .env")
+        sys.exit(1)
     else:
         # 1. Ensure directories exist and the file header matches what we write
         os.makedirs(os.path.dirname(RAW_DATA_PATH), exist_ok=True)
@@ -149,6 +159,15 @@ if __name__ == "__main__":
         # 2. Check for existing work
         processed_ids = load_processed_ids()
         print(f"📂 Loaded {len(processed_ids)} previously processed matches.")
+        initial_count = len(processed_ids)
+
+        try:
+            WATCHER.league.challenger_by_queue('na1', QUEUE_TYPE)  # fail fast on a bad key
+        except ApiError as err:
+            if err.response is not None and err.response.status_code in (401, 403):
+                print(f"❌ Riot API rejected the key ({err.response.status_code}). Development keys expire "
+                      "every 24h; set a valid RIOT_KEY (repo secret for the weekly workflow).")
+                sys.exit(1)
 
         for platform, routing in REGIONS.items():
             match_ids = get_massive_match_ids(platform, routing, processed_ids)
@@ -173,4 +192,7 @@ if __name__ == "__main__":
             if batch_data:
                 append_rows(batch_data)
 
-        print(f"✨ Automation Cycle Complete. Data stored in {RAW_DATA_PATH}")
+        new_count = len(processed_ids) - initial_count
+        print(f"✨ Automation Cycle Complete. {new_count} new match IDs processed. Data stored in {RAW_DATA_PATH}")
+        if new_count == 0:
+            print("⚠️ No new matches collected this run.")
