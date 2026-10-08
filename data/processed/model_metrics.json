@@ -1,0 +1,25 @@
+{
+  "trained_at": "2026-10-08",
+  "matches": 2562,
+  "champions": 172,
+  "validation_matches": 512,
+  "validation": {
+    "full_model": {
+      "log_loss": 0.6878684759140015,
+      "accuracy": 0.537109375,
+      "auc": 0.5420636747219025,
+      "best_epoch": 55
+    },
+    "allies_only_ablation": {
+      "log_loss": 0.6881166100502014,
+      "accuracy": 0.537109375,
+      "auc": 0.5384426543920215,
+      "best_epoch": 53
+    },
+    "baseline_side_only": {
+      "log_loss": 0.690428614616394,
+      "accuracy": 0.537109375,
+      "auc": 0.5
+    }
+  }
+}

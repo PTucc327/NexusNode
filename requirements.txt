@@ -1,7 +1,6 @@
-streamlit
-torch
-torchvision
-torch-geometric
+streamlit>=1.46
+torch>=2.4
+torch-geometric>=2.5
 numpy
 requests
 python-dotenv

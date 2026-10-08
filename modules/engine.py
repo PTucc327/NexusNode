@@ -1,45 +1,75 @@
-import numpy
-import numpy as np
-import torch
 import json
 import os
+from dataclasses import dataclass, field
+
+import numpy as np
 import pandas as pd
-from sklearn.metrics.pairwise import cosine_similarity
+import torch
 
-torch.serialization.add_safe_globals([
-    numpy._core.multiarray._reconstruct, 
-    numpy.ndarray,
-    numpy.dtype,
-    numpy.dtypes.Float32DType
-])
+ROLES = ['TOP', 'JUNGLE', 'MIDDLE', 'BOTTOM', 'SUPPORT']
 
-# Below this many head-to-head games, a matchup's win rate is treated as
-# largely unreliable and gets scaled down rather than trusted outright
-# (a 1-0 "matchup" is not a real counter relationship).
+# Below this many head-to-head games, an observed matchup win rate is too
+# noisy to quote as evidence (a 1-0 "matchup" is not a counter relationship).
 MATCHUP_CONFIDENCE_GAMES = 8
+# Contributions smaller than this (in win-probability points) aren't worth
+# surfacing as reasons.
+REASON_THRESHOLD = 0.002
+
+
+def _sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+@dataclass
+class Recommendation:
+    champion: str
+    win_prob: float              # model win probability with this pick in the draft
+    score: float                 # ranking score (win_prob + comfort bonus)
+    is_comfort: bool
+    synergy: list = field(default_factory=list)   # [(ally, Δwin-prob)]
+    counters: list = field(default_factory=list)  # [(enemy, Δwin-prob)]  (+ = good for us)
+    lane_record: tuple = None                     # (opponent, win_rate, games) observed
+
 
 class DraftingEngine:
-    def __init__(self, embeddings_path='./data/processed/champion_embeddings.pt',
+    """Scores picks with the NexusNode draft model (see train_gnn.py).
+
+    For a draft A (your team) vs B (enemies), the model's logit is additive:
+    power(A) - power(B) + synergy(A) - synergy(B) + Σ cross-team counter terms
+    + Σ lane terms. A candidate's effect is therefore its own power, plus its
+    synergy with each ally, plus its counter interaction with EVERY enemy
+    (not just the lane opponent). That decomposition drives both the ranking
+    and the explanations.
+    """
+
+    def __init__(self, model_path='./data/processed/nexus_model.pt',
                  roles_path='./data/processed/champion_roles.json',
-                 matchups_path='./data/processed/champion_matchups.csv'):
-        self.embeddings = self._load_pt(embeddings_path)
+                 matchups_path='./data/processed/champion_matchups.csv',
+                 metrics_path='./data/processed/model_metrics.json'):
+        art = torch.load(model_path, weights_only=True)
+        self.champions = list(art['champions'])
+        self.index = {c: i for i, c in enumerate(self.champions)}
+        self.roles = list(art['roles'])
+        self.z = art['embeddings'].numpy()
+        self.role_z = art['role_embeddings'].numpy()
+        self.w = art['power'].numpy()
+        self.S = art['synergy'].numpy()
+        self.K = art['counter'].numpy()
+        self.L = art['lane'].numpy()
         self.roles_map = self._load_json(roles_path)
         self.matchups = self._load_matchups(matchups_path)
+        self.metrics = self._load_json(metrics_path)
 
-    def _load_pt(self, path):
-        if os.path.exists(path):
-            return torch.load(path, weights_only=True)
-        return {}
-
-    def _load_json(self, path):
+    @staticmethod
+    def _load_json(path):
         if os.path.exists(path):
             with open(path, 'r') as f:
                 return json.load(f)
         return {}
 
-    def _load_matchups(self, path):
-        """Loads real lane matchup win rates into a dict keyed by
-        (champion_name, opponent_name, role) -> (win_rate, games)."""
+    @staticmethod
+    def _load_matchups(path):
+        """(champion, opponent, role) -> (win_rate, games) observed in lane."""
         if not os.path.exists(path):
             return {}
         df = pd.read_csv(path)
@@ -48,107 +78,112 @@ class DraftingEngine:
             for row in df.itertuples()
         }
 
-    def get_reasoning(self, target_champ, allies, role=None, lane_opponent=None):
-        """XAI: Explains why a champion was recommended based on vector proximity
-        and, if a same-role enemy is known, real lane matchup data."""
-        counter_reason = None
-        if role and lane_opponent and lane_opponent not in ("None", None):
-            wr, games = self.matchups.get((target_champ, lane_opponent, role), (None, 0))
-            if wr is not None and games >= MATCHUP_CONFIDENCE_GAMES:
-                if wr >= 0.53:
-                    counter_reason = f"Favored vs {lane_opponent} ({wr:.0%} in {games} games)"
-                elif wr <= 0.47:
-                    counter_reason = f"Risky vs {lane_opponent} ({wr:.0%} in {games} games)"
+    # --- helpers ---------------------------------------------------------
+    def _token(self, champ, role):
+        return self.z[self.index[champ]] + self.role_z[self.roles.index(role)]
 
-        if not allies or target_champ not in self.embeddings:
-            return counter_reason or "Strong Meta Pick"
-        
-        target_vec = self.embeddings[target_champ].reshape(1, -1)
-        best_partner, max_sim = None, -1
-        
-        for ally in allies:
-            if ally in self.embeddings and ally != "None":
-                ally_vec = self.embeddings[ally].reshape(1, -1)
-                sim = cosine_similarity(target_vec, ally_vec)[0][0]
-                if sim > max_sim:
-                    max_sim, best_partner = sim, ally
+    def _clean(self, picks):
+        """{role: champ|None} -> {role: champ} for champs the model knows."""
+        return {r: c for r, c in (picks or {}).items() if c and c in self.index}
 
-        synergy_reason = f"Synergy with {best_partner}" if best_partner else "Balanced Fit"
-        if counter_reason:
-            return f"{synergy_reason} · {counter_reason}"
-        return synergy_reason
+    def eligible(self, role):
+        return [c for c in self.roles_map.get(role, []) if c in self.index]
 
-    def get_counter_score(self, champ, role, lane_opponent):
-        """Confidence-weighted lane matchup edge for `champ` against the
-        enemy in the SAME role, e.g. your BOTTOM pick vs their BOTTOM pick.
-        Returns a value in roughly [-0.5, 0.5]: positive means historically
-        favored, negative means historically losing that matchup. Matchups
-        with few recorded games are scaled toward 0 (no strong opinion)
-        rather than trusted at face value.
+    def lane_record(self, champ, role, opponent):
+        wr, games = self.matchups.get((champ, opponent, role), (None, 0))
+        if wr is None or games < MATCHUP_CONFIDENCE_GAMES:
+            return None
+        return (opponent, float(wr), int(games))
+
+    # --- scoring ---------------------------------------------------------
+    def _draft_logit(self, allies, enemies, enemy_weight=1.0):
+        """Logit that `allies` beat `enemies` (both {role: champ}, may be partial)."""
+        ta = {r: self._token(c, r) for r, c in allies.items()}
+        tb = {r: self._token(c, r) for r, c in enemies.items()}
+
+        def team(t):
+            vecs = list(t.values())
+            power = sum(v @ self.w for v in vecs)
+            syn = sum(vecs[i] @ self.S @ vecs[j] for i in range(len(vecs)) for j in range(i + 1, len(vecs)))
+            return power + syn
+
+        cross = sum(a @ self.K @ b for a in ta.values() for b in tb.values())
+        lane = sum(ta[r] @ self.L @ tb[r] for r in ta if r in tb)
+        return team(ta) - team(tb) + enemy_weight * (cross + lane)
+
+    def win_probability(self, allies, enemies, enemy_weight=1.0):
+        allies, enemies = self._clean(allies), self._clean(enemies)
+        if not allies and not enemies:
+            return None
+        return float(_sigmoid(self._draft_logit(allies, enemies, enemy_weight)))
+
+    def recommend(self, user_role, allies, enemies, comfort_pool=(), comfort_bonus=0.03,
+                  enemy_weight=1.0, top_k=None):
+        """Ranks every eligible champion for `user_role`.
+
+        allies / enemies: {role: champion or None}. `allies` must not include
+        user_role. Works with any number of picks, including none (blind pick).
+        comfort_bonus: win-probability points added to comfort picks for ranking.
+        enemy_weight: scales every enemy interaction term (0 = ignore enemies).
         """
-        if not lane_opponent or lane_opponent == "None":
-            return 0.0
-        wr, games = self.matchups.get((champ, lane_opponent, role), (None, 0))
-        if wr is None:
-            return 0.0
-        confidence = min(games / MATCHUP_CONFIDENCE_GAMES, 1.0)
-        return (wr - 0.5) * confidence
+        allies, enemies = self._clean(allies), self._clean(enemies)
+        allies.pop(user_role, None)
+        taken = set(allies.values()) | set(enemies.values())
+        comfort = set(comfort_pool or [])
 
-    def run_synthesis(self, user_role, allies, enemies, comfort_pool, loyalty_boost=1.2, enemy_weight=1.0):
-        """
-        The core DS logic: 
-        1. Filters by role
-        2. Calculates team centroid (ally synergy)
-        3. Applies comfort multipliers
-        4. Applies a real lane-matchup counter score against the enemy
-           laner in the same role
+        base_logit = self._draft_logit(allies, enemies, enemy_weight)
+        ally_tokens = {c: self._token(c, r) for r, c in allies.items()}
+        enemy_tokens = {c: (r, self._token(c, r)) for r, c in enemies.items()}
+        lane_opp = enemies.get(user_role)
 
-        `enemies` can be either:
-          - a dict {role: champion_or_None} for all 5 roles (preferred --
-            enables real same-role matchup scoring), or
-          - a flat list of champion names (legacy behavior -- still used
-            for exclusion, but no matchup scoring is possible without
-            knowing which role each enemy occupies)
-        """
-        eligible_champs = self.roles_map.get(user_role, [])
-        active_allies = [a for a in allies if a != "None" and a in self.embeddings]
-        
-        if not active_allies:
-            return []
+        recs = []
+        for champ in self.eligible(user_role):
+            if champ in taken:
+                continue
+            t = self._token(champ, user_role)
+            syn_terms = {a: t @ self.S @ ta for a, ta in ally_tokens.items()}
+            ctr_terms = {}
+            for e, (r, te) in enemy_tokens.items():
+                term = t @ self.K @ te
+                if r == user_role:
+                    term += t @ self.L @ te
+                ctr_terms[e] = enemy_weight * term
+            delta = t @ self.w + sum(syn_terms.values()) + sum(ctr_terms.values())
+            p = float(_sigmoid(base_logit + delta))
 
-        if isinstance(enemies, dict):
-            enemy_by_role = enemies
-            all_enemies = list(enemies.values())
-        else:
-            enemy_by_role = {}
-            all_enemies = list(enemies)
-        lane_opponent = enemy_by_role.get(user_role)
+            # Convert each logit term to an approximate win-prob effect at p
+            slope = p * (1 - p)
+            synergy = sorted(((a, float(v * slope)) for a, v in syn_terms.items()), key=lambda x: -x[1])
+            counters = sorted(((e, float(v * slope)) for e, v in ctr_terms.items()), key=lambda x: -x[1])
 
-        # Create Team Centroid (Mean of teammate vectors)
-        ally_vectors = [self.embeddings[a] for a in active_allies]
-        team_centroid = np.mean(ally_vectors, axis=0).reshape(1, -1)
-        
-        scores = []
-        for champ in eligible_champs:
-            if champ in self.embeddings and champ not in allies and champ not in all_enemies:
-                champ_vec = self.embeddings[champ].reshape(1, -1)
-                base_sim = cosine_similarity(team_centroid, champ_vec)[0][0]
-                
-                # Apply Loyalty Bonus
-                # NOTE: cosine similarity can be negative here, so a naive
-                # `base_sim * loyalty_boost` would make comfort picks with a
-                # negative fit score WORSE instead of better. Boost additively
-                # instead, scaled by the magnitude of the base score, so the
-                # bonus always pushes the score in the favorable direction.
-                if champ in comfort_pool:
-                    ally_score = base_sim + (loyalty_boost - 1) * abs(base_sim)
-                else:
-                    ally_score = base_sim
+            is_comfort = champ in comfort
+            recs.append(Recommendation(
+                champion=champ,
+                win_prob=p,
+                score=p + (comfort_bonus if is_comfort else 0.0),
+                is_comfort=is_comfort,
+                synergy=synergy,
+                counters=counters,
+                lane_record=self.lane_record(champ, user_role, lane_opp) if lane_opp else None,
+            ))
 
-                # Apply enemy lane-matchup counter score
-                counter_score = self.get_counter_score(champ, user_role, lane_opponent)
-                final_score = ally_score + enemy_weight * counter_score
+        recs.sort(key=lambda r: r.score, reverse=True)
+        return recs[:top_k] if top_k else recs
 
-                scores.append((champ, final_score))
-        
-        return sorted(scores, key=lambda x: x[1], reverse=True)[:5]
+    @staticmethod
+    def reasons(rec, display=lambda n: n):
+        """Short human-readable reasons for a recommendation."""
+        out = []
+        good_syn = [(a, v) for a, v in rec.synergy if v >= REASON_THRESHOLD]
+        if good_syn:
+            out.append(("synergy", "Synergy with " + ", ".join(f"{display(a)} ({v * 100:+.1f})" for a, v in good_syn[:2])))
+        strong = [(e, v) for e, v in rec.counters if v >= REASON_THRESHOLD]
+        if strong:
+            out.append(("strong", "Strong vs " + ", ".join(f"{display(e)} ({v * 100:+.1f})" for e, v in strong[:2])))
+        weak = [(e, v) for e, v in reversed(rec.counters) if v <= -REASON_THRESHOLD]
+        if weak:
+            out.append(("weak", "Weak vs " + ", ".join(f"{display(e)} ({v * 100:+.1f})" for e, v in weak[:2])))
+        if rec.lane_record:
+            opp, wr, games = rec.lane_record
+            out.append(("lane", f"{wr:.0%} win rate vs {display(opp)} in lane ({games} games)"))
+        return out
