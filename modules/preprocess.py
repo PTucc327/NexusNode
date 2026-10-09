@@ -121,11 +121,11 @@ def generate_graph_data():
 
     # A champ is "eligible" for a role only if:
     #   (a) that role makes up a meaningful share of their games (>15%), AND
-    #   (b) there's enough sample size to trust it (>=10 games in that role)
+    #   (b) there's enough sample size to trust it (>=MIN_ROLE_GAMES in that role)
     # This filters out one-off troll picks / autofills (e.g. Aatrox bot,
     # Ezreal support).
     MIN_ROLE_SHARE = 0.15
-    MIN_ROLE_GAMES = 10
+    MIN_ROLE_GAMES = 20  # raised from 10 once the dataset passed ~4k matches
 
     role_mapping = {}
     for role in role_counts.columns:

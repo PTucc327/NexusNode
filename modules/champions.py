@@ -21,14 +21,15 @@ def _key(name):
 
 
 def fetch_ddragon():
-    """Returns {'version': str, 'champions': {ddragon_id: {'name', 'key'}}}
+    """Returns {'version': str, 'champions': {ddragon_id: {'name', 'key', 'tags', 'info'}}}
     from the live CDN, falling back to the bundled snapshot."""
     try:
         version = requests.get(DDRAGON_VERSIONS_URL, timeout=REQUEST_TIMEOUT).json()[0]
         data = requests.get(DDRAGON_CHAMPIONS_URL.format(version=version), timeout=REQUEST_TIMEOUT).json()['data']
         return {
             'version': version,
-            'champions': {cid: {'name': c['name'], 'key': int(c['key'])} for cid, c in data.items()},
+            'champions': {cid: {'name': c['name'], 'key': int(c['key']), 'tags': c.get('tags', []),
+                                'info': c.get('info', {})} for cid, c in data.items()},
         }
     except Exception:
         if os.path.exists(SNAPSHOT_PATH):
@@ -69,6 +70,14 @@ class ChampionCatalog:
         """Matches a Data Dragon id / display name onto the dataset's spelling."""
         lookup = {_key(n): n for n in known_names}
         return lookup.get(_key(name))
+
+    def profile(self, api_name):
+        """Class tags (e.g. ['Mage', 'Support']) and Riot's 0-10 attack/magic/
+        defense ratings, used for team composition features."""
+        hit = self._lookup(api_name)
+        if not hit:
+            return {'tags': [], 'info': {}}
+        return {'tags': hit[1].get('tags', []), 'info': hit[1].get('info', {})}
 
     def name_from_numeric_id(self, champion_id):
         return self._by_numeric_id.get(champion_id)

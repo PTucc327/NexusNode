@@ -34,6 +34,7 @@ from sklearn.metrics import roc_auc_score
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from modules.preprocess import build_node_features  # noqa: E402
+from modules.composition import champion_profiles, team_features, NUM_FEATURES  # noqa: E402
 
 ROLES = ['TOP', 'JUNGLE', 'MIDDLE', 'BOTTOM', 'SUPPORT']
 SEED = 7
@@ -54,6 +55,10 @@ DROPOUT = 0.5
 # leaked into every other role it is occasionally played in.
 ROLE_BIAS_SIGMA = 0.1
 LANE_EVIDENCE_SIGMA = 0.1  # prior std (logit) of a lane matchup's effect; CV-chosen
+USE_COMPOSITION = True  # time-based CV: better in all 4 seeds, mostly on the newest patch
+# Recency weighting: a match N patches older than the newest counts 0.5**(N/half-life).
+# None = no weighting. Chosen on a time-based validation split (8 tied 4, beat None and 2).
+PATCH_HALF_LIFE = 8
 USE_SHARED_POWER = False  # CV: no gain from it, and it leaks strength across roles
 BLUE_TEAM_ID = 100
 
@@ -81,6 +86,37 @@ def build_match_tensors(df, champ_to_id):
         red.append(sides[red_tid][0])
         y.append(float(sides[BLUE_TEAM_ID][1]))
     return torch.tensor(blue), torch.tensor(red), torch.tensor(y)
+
+
+def match_metadata(df):
+    """Per-match (game_start, patch) in the same order as build_match_tensors
+    (groupby match_id). Missing columns -> NaN (data predating patch tracking)."""
+    cols = [c for c in ('game_start', 'game_version') if c in df.columns]
+    meta = df.groupby('match_id')[cols].first() if cols else pd.DataFrame(index=sorted(df['match_id'].unique()))
+    return meta.reindex(columns=['game_start', 'game_version'])
+
+
+PATCHES_PER_SEASON = 24  # LoL ships ~24 patches a year (e.g. 15.24 -> 16.1)
+
+
+def patch_ages(versions):
+    """Patches behind the newest one, by actual patch distance (gaps in the
+    data still count), e.g. ['16.8', '16.20', '16.19'] -> [12, 0, 1].
+    Unknown patches count as the oldest seen."""
+    def ordinal(v):
+        major, minor = str(v).split('.')[:2]
+        return int(major) * PATCHES_PER_SEASON + int(minor)
+    known = [ordinal(v) for v in versions if isinstance(v, str)]
+    if not known:
+        return np.zeros(len(versions))
+    newest, oldest = max(known), min(known)
+    return np.array([newest - ordinal(v) if isinstance(v, str) else newest - oldest for v in versions], dtype=float)
+
+
+def recency_weights(versions, half_life=None):
+    if half_life is None:
+        return torch.ones(len(versions))
+    return torch.tensor(0.5 ** (patch_ages(versions) / half_life), dtype=torch.float)
 
 
 def build_graph(blue, red, num_nodes):
@@ -125,8 +161,14 @@ class RelationalGCNLayer(nn.Module):
 
 
 class NexusDraftModel(nn.Module):
-    def __init__(self, num_champs, num_features, embed_dim=EMBED_DIM, use_enemy_terms=True):
+    def __init__(self, num_champs, num_features, embed_dim=EMBED_DIM, use_enemy_terms=True, profiles=None):
         super().__init__()
+        # Team composition: champion profiles -> team features (composition.py)
+        self.use_composition = USE_COMPOSITION and profiles is not None
+        if self.use_composition:
+            self.register_buffer('profiles', torch.as_tensor(profiles))
+        self.comp_power = nn.Parameter(torch.zeros(NUM_FEATURES))
+        self.comp_cross_raw = nn.Parameter(torch.randn(NUM_FEATURES, NUM_FEATURES) * 0.01)
         self.use_enemy_terms = use_enemy_terms
         self.use_shared_power = USE_SHARED_POWER
         # Strength of each (champion, role), shrunk toward 0 by bias_penalty()
@@ -151,6 +193,9 @@ class NexusDraftModel(nn.Module):
 
     def lane_matrix(self):
         return self.lane_raw - self.lane_raw.T
+
+    def comp_cross_matrix(self):
+        return self.comp_cross_raw - self.comp_cross_raw.T
 
     def embed(self, x, graph):
         ids = torch.arange(x.size(0))
@@ -185,6 +230,11 @@ class NexusDraftModel(nn.Module):
             cross = torch.einsum('mid,de,mje->mij', t_blue, self.counter_matrix(), t_red)
             lane = torch.einsum('mid,de,mie->mi', t_blue, self.lane_matrix(), t_red)
             logit = logit + cross.sum(dim=(1, 2)) + lane.sum(dim=1)
+        if self.use_composition:
+            g_blue, g_red = team_features(self.profiles[blue]), team_features(self.profiles[red])
+            logit = logit + (g_blue - g_red) @ self.comp_power
+            if self.use_enemy_terms:
+                logit = logit + ((g_blue @ self.comp_cross_matrix()) * g_red).sum(dim=-1)
         return logit
 
 
@@ -203,9 +253,10 @@ def _lane_pairs(blue_row, red_row):
         yield ((a, b, role), 1.0) if a <= b else ((b, a, role), -1.0)
 
 
-def lane_evidence(blue, red, y, base_logits, sigma=LANE_EVIDENCE_SIGMA):
+def lane_evidence(blue, red, y, base_logits, sigma=LANE_EVIDENCE_SIGMA, weight=None):
     p = torch.sigmoid(base_logits).numpy()
-    residual, info = y.numpy() - p, p * (1 - p)
+    w = np.ones(len(p)) if weight is None else weight.numpy()
+    residual, info = w * (y.numpy() - p), w * p * (1 - p)
     acc = {}
     for m, (b, r) in enumerate(zip(blue.tolist(), red.tolist())):
         for key, sign in _lane_pairs(b, r):
@@ -239,7 +290,7 @@ def evaluate(logits, y):
     }
 
 
-def fit(model, x, graph, blue, red, y, epochs, val=None):
+def fit(model, x, graph, blue, red, y, epochs, val=None, weight=None):
     """Trains full-batch. With `val`, early-stops on validation log loss and
     returns (best_epoch, best_metrics); otherwise trains exactly `epochs`."""
     torch.manual_seed(SEED)
@@ -254,8 +305,9 @@ def fit(model, x, graph, blue, red, y, epochs, val=None):
     for epoch in range(1, epochs + 1):
         model.train()
         optimizer.zero_grad()
-        loss = F.binary_cross_entropy_with_logits(model(model.embed(x, graph), blue, red), y, reduction='sum')
-        loss = (loss + model.bias_penalty()) / len(y)
+        w = torch.ones_like(y) if weight is None else weight
+        loss = (w * F.binary_cross_entropy_with_logits(model(model.embed(x, graph), blue, red), y, reduction='none')).sum()
+        loss = (loss + model.bias_penalty()) / w.sum()
         loss.backward()
         optimizer.step()
 
@@ -277,16 +329,31 @@ def train_model():
         return
 
     torch.manual_seed(SEED)
-    df = pd.read_csv(INPUT_PATH)
+    df = pd.read_csv(INPUT_PATH, dtype={'game_version': str})  # '16.20' must not become 16.2
     champions = sorted(df['champion_name'].unique())
     champ_to_id = {c: i for i, c in enumerate(champions)}
+    profiles = champion_profiles(champions)
 
     blue, red, y = build_match_tensors(df, champ_to_id)
     match_ids = np.array(sorted(df['match_id'].unique()))
-    perm = torch.randperm(len(y), generator=torch.Generator().manual_seed(SEED))
+    meta = match_metadata(df)
+    assert len(meta) == len(y)
     n_val = int(len(y) * VAL_FRACTION)
-    val_idx, train_idx = perm[:n_val], perm[n_val:]
-    print(f"📊 {len(y)} matches · {len(champions)} champions · train {len(train_idx)} / val {len(val_idx)}")
+    if meta['game_start'].notna().all():
+        # Time-based split: validate on the newest matches ("does it work next week?")
+        order = torch.tensor(meta.reset_index().sort_values(['game_start', 'match_id']).index.to_numpy())
+        train_idx, val_idx = order[:-n_val], order[-n_val:]
+        split = 'newest'
+    else:
+        perm = torch.randperm(len(y), generator=torch.Generator().manual_seed(SEED))
+        val_idx, train_idx = perm[:n_val], perm[n_val:]
+        split = 'random'
+    versions = meta['game_version'].tolist()
+    weight_train = recency_weights([versions[i] for i in train_idx.tolist()], PATCH_HALF_LIFE)
+    weight_all = recency_weights(versions, PATCH_HALF_LIFE)
+    patches = sorted({v for v in versions if isinstance(v, str)}, key=lambda v: tuple(map(int, v.split('.'))))
+    print(f"📊 {len(y)} matches · {len(champions)} champions · train {len(train_idx)} / val {len(val_idx)} "
+          f"({split} {VAL_FRACTION:.0%}) · patches {patches[0] + '-' + patches[-1] if patches else 'unknown'}")
 
     # Graph + node features from the TRAINING split only (no validation leakage)
     train_match_ids = set(match_ids[train_idx.numpy()])
@@ -300,27 +367,28 @@ def train_model():
     results = {}
     for name, use_enemy in [('full_model', True), ('allies_only_ablation', False)]:
         torch.manual_seed(SEED)
-        m = NexusDraftModel(len(champions), x_train.shape[1], use_enemy_terms=use_enemy)
+        m = NexusDraftModel(len(champions), x_train.shape[1], use_enemy_terms=use_enemy, profiles=profiles)
         best_epoch, metrics = fit(m, x_train, graph_train, blue[train_idx], red[train_idx], y[train_idx],
-                                  MAX_EPOCHS, val=val)
+                                  MAX_EPOCHS, val=val, weight=weight_train)
         results[name] = {**metrics, 'best_epoch': best_epoch}
-        if use_enemy:
-            full_model = m
         print(f"   {name:22s} | val log loss {metrics['log_loss']:.4f} | acc {metrics['accuracy']:.3f} "
               f"| AUC {metrics['auc']:.3f} | epoch {best_epoch}")
 
-    # Lane evidence estimated on the training split, scored on validation.
-    # (Uses the final-epoch model, so it's compared against that model's own
-    # val score rather than the early-stopped best above.)
+    # Mirror what ships: refit on the training split for the selected number
+    # of epochs, then add lane evidence estimated on the training split.
+    torch.manual_seed(SEED)
+    full_model = NexusDraftModel(len(champions), x_train.shape[1], profiles=profiles)
+    fit(full_model, x_train, graph_train, blue[train_idx], red[train_idx], y[train_idx],
+        max(results['full_model']['best_epoch'], 1), weight=weight_train)
     full_model.eval()
     with torch.no_grad():
         z_tr = full_model.embed(x_train, graph_train)
         base_tr = full_model(z_tr, blue[train_idx], red[train_idx])
         base_val = full_model(z_tr, *val[:2])
-    effects = lane_evidence(blue[train_idx], red[train_idx], y[train_idx], base_tr)
-    results['full_model_final_epoch'] = evaluate(base_val, val[2])
+    effects = lane_evidence(blue[train_idx], red[train_idx], y[train_idx], base_tr, weight=weight_train)
+    results['full_model_refit'] = evaluate(base_val, val[2])
     results['full_model_plus_lane_evidence'] = evaluate(base_val + apply_lane_evidence(*val[:2], effects), val[2])
-    for name in ('full_model_final_epoch', 'full_model_plus_lane_evidence'):
+    for name in ('full_model_refit', 'full_model_plus_lane_evidence'):
         r = results[name]
         print(f"   {name:22s} | val log loss {r['log_loss']:.4f} | acc {r['accuracy']:.3f} | AUC {r['auc']:.3f}")
 
@@ -335,13 +403,13 @@ def train_model():
     x_all = node_feature_tensor(df, champions)
     graph_all = build_graph(blue, red, len(champions))
     torch.manual_seed(SEED)
-    model = NexusDraftModel(len(champions), x_all.shape[1])
-    fit(model, x_all, graph_all, blue, red, y, max(results['full_model']['best_epoch'], 1))
+    model = NexusDraftModel(len(champions), x_all.shape[1], profiles=profiles)
+    fit(model, x_all, graph_all, blue, red, y, max(results['full_model']['best_epoch'], 1), weight=weight_all)
 
     model.eval()
     with torch.no_grad():
         z = model.embed(x_all, graph_all)
-        effects = lane_evidence(blue, red, y, model(z, blue, red))
+        effects = lane_evidence(blue, red, y, model(z, blue, red), weight=weight_all)
         lane_keys = sorted(effects)
         artifact = {
             'format_version': 3,
@@ -350,6 +418,9 @@ def train_model():
             'embeddings': z.clone(),
             'role_embeddings': model.role_embed.detach().clone(),
             'power': model.power.detach().clone() if model.use_shared_power else torch.zeros_like(model.power),
+            'profiles': torch.as_tensor(profiles) if model.use_composition else None,
+            'comp_power': model.comp_power.detach().clone(),
+            'comp_cross': model.comp_cross_matrix().detach().clone(),
             'role_strength': model.role_bias.weight.detach().view(len(champions), len(ROLES)).clone(),
             'synergy': model.synergy_matrix().detach().clone(),
             'counter': model.counter_matrix().detach().clone(),
@@ -366,6 +437,10 @@ def train_model():
         'matches': int(len(y)),
         'champions': len(champions),
         'validation_matches': int(n_val),
+        'validation_split': split,
+        'patches': [patches[0], patches[-1]] if patches else None,
+        'patch_half_life': PATCH_HALF_LIFE,
+        'use_composition': bool(model.use_composition),
         'validation': results,
     }
     with open(METRICS_PATH, 'w') as f:

@@ -1,34 +1,41 @@
 {
-  "trained_at": "2026-10-08",
-  "matches": 2562,
-  "champions": 172,
-  "validation_matches": 512,
+  "trained_at": "2026-10-09",
+  "matches": 4454,
+  "champions": 173,
+  "validation_matches": 890,
+  "validation_split": "newest",
+  "patches": [
+    "16.6",
+    "16.20"
+  ],
+  "patch_half_life": 8,
+  "use_composition": true,
   "validation": {
     "full_model": {
-      "log_loss": 0.687530517578125,
-      "accuracy": 0.54296875,
-      "auc": 0.5461143076332949,
-      "best_epoch": 60
+      "log_loss": 0.690560519695282,
+      "accuracy": 0.5191011235955056,
+      "auc": 0.5336559857587896,
+      "best_epoch": 15
     },
     "allies_only_ablation": {
-      "log_loss": 0.6875303983688354,
-      "accuracy": 0.54296875,
-      "auc": 0.5459915611814345,
-      "best_epoch": 61
+      "log_loss": 0.6915600299835205,
+      "accuracy": 0.503370786516854,
+      "auc": 0.5230863373386738,
+      "best_epoch": 19
     },
-    "full_model_final_epoch": {
-      "log_loss": 0.6875909566879272,
-      "accuracy": 0.54296875,
-      "auc": 0.5456540084388186
+    "full_model_refit": {
+      "log_loss": 0.690560519695282,
+      "accuracy": 0.5191011235955056,
+      "auc": 0.5336559857587896
     },
     "full_model_plus_lane_evidence": {
-      "log_loss": 0.6863721609115601,
-      "accuracy": 0.541015625,
-      "auc": 0.5533563482930571
+      "log_loss": 0.6900306344032288,
+      "accuracy": 0.5280898876404494,
+      "auc": 0.5393959622931586
     },
     "baseline_side_only": {
-      "log_loss": 0.690428614616394,
-      "accuracy": 0.537109375,
+      "log_loss": 0.692621111869812,
+      "accuracy": 0.5191011235955056,
       "auc": 0.5
     }
   }

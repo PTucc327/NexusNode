@@ -24,25 +24,30 @@ NexusNode replaces static stats with a Dynamic Embedding Model. By treating cham
 ## 🏗️ Technical Architecture
 The project is structured as a modular MLOps Pipeline:
 
-- Ingestion (collect_data.py): A weekly automated scraper of Ranked Solo/Duo games from Challenger players across 4 global regions.
+- Ingestion (collect_data.py): A weekly automated scraper of Ranked Solo/Duo games (queue 420 only) from the top Challenger and Grandmaster players across 4 regions (NA, EUW, KR, BR), newest matches first. Each game records its patch and date. Scale is set by environment variables (`PLAYERS_PER_TIER`, `MATCHES_PER_PLAYER`, `MAX_NEW_MATCHES_PER_REGION`, `RIOT_REQUEST_DELAY`). `python modules/collect_data.py --backfill` fills patch/date/queue for older rows.
 
-- Transformation (eda.py): Deduplicates raw Riot API data, standardizes roles, and keeps only complete 5v5 drafts.
+- Transformation (eda.py): Keeps only verified Ranked Solo games, deduplicates, standardizes roles, and keeps only complete 5v5 drafts.
 
 - Featurization (preprocess.py):
 
   - Builds per-champion stat features (StandardScaled) and a two-relation champion graph: **teammate (synergy)** edges and **opponent (counter)** edges.
 
-  - Builds role eligibility and an observed lane-matchup table used as evidence in the UI.
+  - Builds role eligibility (≥15% of a champion's games and ≥20 games in that role) and an observed lane-matchup table used as evidence in the UI.
 
 - Learning (train_gnn.py):
 
   - **Role strength**: a per-(champion, role) term with a Gaussian prior, so small samples are shrunk toward average and a champion's main-role results don't leak into its off-roles.
+  - **Team composition** (composition.py): class mix, AD/AP imbalance, and frontline for each team, from Data Dragon class tags and damage ratings, with an antisymmetric composition-vs-composition term.
   - **Relational GNN** (one GCN per relation) produces champion embeddings feeding ally-synergy (symmetric) and enemy-counter (antisymmetric, all 25 ally-vs-enemy pairs) bilinear terms, trained end-to-end on match outcomes.
   - **Lane matchup evidence**: observed head-to-head lane results, estimated as residuals against the model with sample-size shrinkage.
+  - **Patch recency**: matches are weighted by `0.5 ** (patches_behind / 8)`, so the current meta dominates while older patches still contribute.
 
-  Each component is kept only if it improves held-out log loss. With the current ~2.5k matches, cross-validation showed lane matchups are the only pairwise signal that generalizes; observed cross-role counters and teammate synergy made predictions worse, and the GNN's interaction terms are regularized to near zero. They grow as more data arrives.
+  Every component and setting is kept only if it improves log loss on the **newest** held-out matches (rolling time-based validation, averaged over seeds where effects are small). With the current data, cross-validation showed lane matchups are the only pairwise signal that generalizes. Observed cross-role counters and teammate synergy made predictions worse, and the GNN's interaction terms are regularized to near zero. They grow as more data arrives.
 
-- Deployment (app.py): A Streamlit draft assistant with champion portraits (Data Dragon), a live win-probability bar, and ranked recommendations explained by their synergy with each ally and their edge/weakness against each enemy.
+- Deployment (app.py, engine.py): A Streamlit draft assistant with champion portraits (Data Dragon), bans, a live win-probability bar, and ranked recommendations explained by role strength (with sample size), team composition, lane matchup records, and synergy/counters relative to the other options.
+
+  - **Counter pick**: when your lane opponent is locked in, picks are scored directly against them.
+  - **Blind pick**: otherwise, picks are scored against the 12 most-played champions still available for that role, and picks that one of them specifically counters (worse than other picks fare against it) are ranked lower and flagged ("Countered by Jayce").
 
 ---
 
@@ -51,13 +56,15 @@ The project utilizes GitHub Actions to maintain model relevancy in the ever-shif
 
 Weekly Scrape & Retrain: Every Monday at 00:00 UTC, a headless runner:
 
-- Scrapes ~1,000+ new high-Elo matches.
+- Scrapes up to 2,000 new high-Elo Ranked Solo matches (500 per region).
 
 - Cleans and transforms the data.
 
-- Retrains the draft model on the updated graph.
+- Retrains the draft model with recency weighting toward the newest patch.
 
 - Commits the refreshed data and `data/processed/nexus_model.pt` back to the repository.
+
+The scraper exits with an error if the Riot API key is missing or rejected, so an expired key fails the workflow visibly. Development keys expire every 24 hours; use a personal or production key for the `RIOT_KEY` repository secret.
 
 ---
 
@@ -98,17 +105,17 @@ streamlit run app.py
 ---
 
 ## 🧪 Model Performance
-Held-out validation on 512 matches (2,050 training matches, 172 champions):
+Trained on 4,454 Ranked Solo games from patches 16.6–16.20, 173 champions. Validated on the **newest 890 matches** (time-based split: trained on older games, tested on later ones, which is the honest test for "will this work next week"):
 
 | Model | Log loss ↓ | AUC ↑ |
 |---|---|---|
-| **Role strength + GNN + lane matchup evidence (shipped)** | **0.6864** | **0.553** |
-| Role strength + GNN | 0.6875 | 0.546 |
-| Without enemy terms (ablation) | 0.6875 | 0.546 |
-| No draft information (side bias only) | 0.6904 | 0.500 |
+| **Full model + lane matchup evidence (shipped)** | **0.6900** | **0.539** |
+| Full model, no lane evidence | 0.6906 | 0.534 |
+| Without enemy terms (ablation) | 0.6916 | 0.523 |
+| No draft information (side bias only) | 0.6926 | 0.500 |
 
-- Hyperparameters and shrinkage strengths chosen by 3-fold cross-validation with early stopping.
-- Draft-only prediction is a low-signal problem (player skill and execution dominate at Challenger), so the model's job is to rank picks by a few points of win probability, not to call games. Expect pairwise effects (synergy, cross-lane counters) to become visible as the weekly pipeline grows the dataset.
+- Hyperparameters, shrinkage strengths, recency half-life and the composition features were chosen by rolling time-based validation.
+- Draft-only prediction is a low-signal problem (player skill and execution dominate at Challenger), so the model's job is to rank picks by a few points of win probability, not to call games. Pairwise effects (synergy, cross-lane counters) should become visible as the weekly pipeline grows the dataset.
 
 ![performance](./images/LinkedinPostImage2.png)
 ---

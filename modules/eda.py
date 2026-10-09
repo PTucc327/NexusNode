@@ -3,6 +3,7 @@ import pandas as pd
 import os
 
 ROLES = ['TOP', 'JUNGLE', 'MIDDLE', 'BOTTOM', 'SUPPORT']
+RANKED_SOLO_QUEUE_ID = 420
 
 def clean_data():
     # Define paths based on your new directory structure
@@ -14,12 +15,21 @@ def clean_data():
         return
 
     # 1. Load data (warn rather than silently skip malformed lines)
-    df = pd.read_csv(input_path, on_bad_lines='warn')
+    # game_version as text: pandas would parse '16.20' as the float 16.2
+    df = pd.read_csv(input_path, on_bad_lines='warn', dtype={'game_version': str})
     raw_rows = len(df)
 
     # 2. Data Cleaning
     # The collector can re-append a match if a run is interrupted mid-batch
     df = df.drop_duplicates(subset=['match_id', 'team_id', 'champion_name'])
+
+    # Ranked Solo only. The original scraper had no queue filter, and other
+    # role-assigned queues (e.g. queue 3130) slipped through; matches with no
+    # recorded queue can't be verified, so they're dropped too.
+    if 'queue_id' in df.columns:
+        non_ranked = df.loc[df['queue_id'] != RANKED_SOLO_QUEUE_ID, 'match_id'].nunique()
+        df = df[df['queue_id'] == RANKED_SOLO_QUEUE_ID]
+        print(f"   - Dropped {non_ranked} matches that aren't (or can't be verified as) Ranked Solo.")
 
     # Drop rows where role is NaN or empty string
     df = df.dropna(subset=['role'])

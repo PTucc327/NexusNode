@@ -1,9 +1,10 @@
 import sys
+import argparse
 import pandas as pd
 from riotwatcher import LolWatcher, ApiError
 import time
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # --- CONFIGURATION ---
@@ -14,11 +15,19 @@ QUEUE_TYPE = 'RANKED_SOLO_5x5'
 RANKED_SOLO_QUEUE_ID = 420  # match-v5 queue id for Ranked Solo/Duo
 MAX_RETRIES = 3
 
+# Scale knobs (env-overridable). Defaults fit a development key's
+# 100 requests / 2 minutes; with a production key, lower REQUEST_DELAY.
+REQUEST_DELAY = float(os.getenv('RIOT_REQUEST_DELAY', 1.2))
+PLAYERS_PER_TIER = int(os.getenv('PLAYERS_PER_TIER', 40))
+MATCHES_PER_PLAYER = int(os.getenv('MATCHES_PER_PLAYER', 20))
+MAX_NEW_MATCHES_PER_REGION = int(os.getenv('MAX_NEW_MATCHES_PER_REGION', 500))
+
 # Correct relative paths based on your new directory structure
 RAW_DATA_PATH = os.path.join('data', 'raw', 'league_match_data.csv')
 RAW_COLUMNS = [
     'match_id', 'region', 'champion_name', 'team_id', 'win', 'role', 'kills', 'deaths',
-    'assists', 'damage_to_champs', 'gold_earned', 'collected_at'
+    'assists', 'damage_to_champs', 'gold_earned', 'collected_at',
+    'game_version', 'game_start', 'queue_id'
 ]
 
 REGIONS = {
@@ -27,6 +36,12 @@ REGIONS = {
     'kr': 'asia',
     'br1': 'americas'
 }
+
+# Read patch strings as text: pandas would parse '16.20' as the float 16.2
+TEXT_COLUMNS = {'game_version': str}
+
+# Apex tiers to sample players from (league-v4 endpoint per tier)
+TIERS = ['challenger', 'grandmaster']
 
 class RiotAuthError(Exception):
     """Key rejected (401/403). Not an ApiError subclass, so per-player
@@ -68,7 +83,7 @@ def ensure_raw_schema():
         return
     existing_cols = pd.read_csv(RAW_DATA_PATH, nrows=0).columns.tolist()
     if existing_cols != RAW_COLUMNS:
-        df = pd.read_csv(RAW_DATA_PATH)
+        df = pd.read_csv(RAW_DATA_PATH, dtype=TEXT_COLUMNS)
         df.reindex(columns=RAW_COLUMNS).to_csv(RAW_DATA_PATH, index=False)
         print(f"🔧 Migrated {RAW_DATA_PATH} to the current column schema.")
 
@@ -77,13 +92,23 @@ def append_rows(rows):
     file_exists = os.path.isfile(RAW_DATA_PATH)
     df.to_csv(RAW_DATA_PATH, mode='a', index=False, header=not file_exists)
 
-def get_massive_match_ids(platform, routing, processed_ids, player_limit=25, matches_per_player=20):
-    print(f"🚀 Fetching Challenger data for {platform.upper()}...")
+def get_league_players(platform, tier):
+    fetch = getattr(WATCHER.league, f'{tier}_by_queue')
+    entries = call_with_retry(fetch, platform, QUEUE_TYPE).get('entries', [])
+    # Highest LP first so a partial sample is the strongest players
+    entries.sort(key=lambda e: e.get('leaguePoints', 0), reverse=True)
+    return entries[:PLAYERS_PER_TIER]
+
+def get_massive_match_ids(platform, routing, processed_ids):
     new_match_ids = set()
 
-    try:
-        chall_league = call_with_retry(WATCHER.league.challenger_by_queue, platform, QUEUE_TYPE)
-        players = chall_league.get('entries', [])[:player_limit]
+    for tier in TIERS:
+        print(f"🚀 Fetching {tier.title()} players for {platform.upper()}...")
+        try:
+            players = get_league_players(platform, tier)
+        except ApiError as err:
+            print(f"❌ Error fetching {tier} in {platform}: {err}")
+            continue
 
         for entry in players:
             try:
@@ -98,28 +123,36 @@ def get_massive_match_ids(platform, routing, processed_ids, player_limit=25, mat
 
                 player_matches = call_with_retry(
                     WATCHER.match.matchlist_by_puuid,
-                    routing, puuid, count=matches_per_player, queue=RANKED_SOLO_QUEUE_ID
+                    routing, puuid, count=MATCHES_PER_PLAYER, queue=RANKED_SOLO_QUEUE_ID
                 )
 
                 for m_id in player_matches:
                     if m_id not in processed_ids:
                         new_match_ids.add(m_id)
 
-                time.sleep(1.2) # Rate limit respect
+                time.sleep(REQUEST_DELAY) # Rate limit respect
 
             except ApiError:
                 continue
 
-    except ApiError as err:
-        print(f"❌ Error in {platform}: {err}")
+    # Newest first (match ids are sequential per platform), capped per run
+    return sorted(new_match_ids, reverse=True)[:MAX_NEW_MATCHES_PER_REGION]
 
-    return list(new_match_ids)
+def patch_of(game_version):
+    """'16.19.712.4459' -> '16.19'"""
+    parts = str(game_version).split('.')
+    return '.'.join(parts[:2]) if len(parts) >= 2 else None
 
-def process_match_data(routing, match_id):
+def fetch_match(routing, match_id):
     try:
-        match = call_with_retry(WATCHER.match.by_id, routing, match_id)
+        return call_with_retry(WATCHER.match.by_id, routing, match_id)
     except ApiError as err:
         print(f"⚠️ Skipping {match_id}: {err}")
+        return None
+
+def process_match_data(routing, match_id):
+    match = fetch_match(routing, match_id)
+    if match is None:
         return None
 
     info = match['info']
@@ -128,6 +161,7 @@ def process_match_data(routing, match_id):
         return None
 
     collected_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    game_start = datetime.fromtimestamp(info['gameCreation'] / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
     participants = []
     for p in info['participants']:
         participants.append({
@@ -142,57 +176,101 @@ def process_match_data(routing, match_id):
             'assists': p['assists'],
             'damage_to_champs': p['totalDamageDealtToChampions'],
             'gold_earned': p['goldEarned'],
-            'collected_at': collected_at
+            'collected_at': collected_at,
+            'game_version': patch_of(info.get('gameVersion')),
+            'game_start': game_start,
+            'queue_id': info.get('queueId'),
         })
     return participants
 
+def backfill_metadata(checkpoint_every=100):
+    """One-off: fetches patch/date/queue for rows scraped before those
+    columns existed (the old scraper had no queue filter, so queue_id lets
+    eda.py drop non-ranked games). Skips matches with no roles at all."""
+    df = pd.read_csv(RAW_DATA_PATH, dtype=TEXT_COLUMNS)
+    has_role = df.groupby('match_id')['role'].apply(lambda r: r.notna().any())
+    todo = [m for m in df.loc[df['game_version'].isna(), 'match_id'].unique() if has_role.get(m, False)]
+    routing_of = df.drop_duplicates('match_id').set_index('match_id')['region'].to_dict()
+    print(f"🔎 Backfilling patch/date for {len(todo)} matches...")
+
+    def save():
+        df.to_csv(RAW_DATA_PATH, index=False)
+
+    for i, m_id in enumerate(todo, 1):
+        match = fetch_match(routing_of[m_id], m_id)
+        if match is not None:
+            info = match['info']
+            mask = df['match_id'] == m_id
+            df.loc[mask, 'game_version'] = patch_of(info.get('gameVersion'))
+            df.loc[mask, 'game_start'] = datetime.fromtimestamp(
+                info['gameCreation'] / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            df.loc[mask, 'queue_id'] = info.get('queueId')
+        if i % checkpoint_every == 0:
+            save()
+            print(f"💾 {i}/{len(todo)} backfilled")
+        time.sleep(REQUEST_DELAY)
+    save()
+    print("✨ Backfill complete.")
+
+def check_key():
+    """Fail fast (non-zero exit) on a rejected key instead of 'succeeding' with no data."""
+    try:
+        WATCHER.league.challenger_by_queue('na1', QUEUE_TYPE)
+    except ApiError as err:
+        if err.response is not None and err.response.status_code in (401, 403):
+            print(f"❌ Riot API rejected the key ({err.response.status_code}). Development keys expire "
+                  "every 24h; set a valid RIOT_KEY (repo secret for the weekly workflow).")
+            sys.exit(1)
+
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")  # emoji logs on Windows consoles
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--backfill', action='store_true',
+                        help='Fill game_version/game_start/queue_id for previously scraped matches, then exit.')
+    args = parser.parse_args()
+
     if not API_KEY:
         print("❌ RIOT_KEY missing in .env")
         sys.exit(1)
-    else:
-        # 1. Ensure directories exist and the file header matches what we write
-        os.makedirs(os.path.dirname(RAW_DATA_PATH), exist_ok=True)
-        ensure_raw_schema()
 
-        # 2. Check for existing work
-        processed_ids = load_processed_ids()
-        print(f"📂 Loaded {len(processed_ids)} previously processed matches.")
-        initial_count = len(processed_ids)
+    # 1. Ensure directories exist and the file header matches what we write
+    os.makedirs(os.path.dirname(RAW_DATA_PATH), exist_ok=True)
+    ensure_raw_schema()
+    check_key()
 
-        try:
-            WATCHER.league.challenger_by_queue('na1', QUEUE_TYPE)  # fail fast on a bad key
-        except ApiError as err:
-            if err.response is not None and err.response.status_code in (401, 403):
-                print(f"❌ Riot API rejected the key ({err.response.status_code}). Development keys expire "
-                      "every 24h; set a valid RIOT_KEY (repo secret for the weekly workflow).")
-                sys.exit(1)
+    if args.backfill:
+        backfill_metadata()
+        sys.exit(0)
 
-        for platform, routing in REGIONS.items():
-            match_ids = get_massive_match_ids(platform, routing, processed_ids)
-            print(f"✅ Found {len(match_ids)} NEW matches in {platform}. Processing...")
+    # 2. Check for existing work
+    processed_ids = load_processed_ids()
+    print(f"📂 Loaded {len(processed_ids)} previously processed matches.")
+    initial_count = len(processed_ids)
 
-            batch_data = []
-            for i, m_id in enumerate(match_ids):
-                data = process_match_data(routing, m_id)
-                processed_ids.add(m_id)
-                if data:
-                    batch_data.extend(data)
+    for platform, routing in REGIONS.items():
+        match_ids = get_massive_match_ids(platform, routing, processed_ids)
+        print(f"✅ Found {len(match_ids)} NEW matches in {platform}. Processing...")
 
-                # Check-pointing: Save every 10 matches so we don't lose data on crash
-                if len(batch_data) >= 100: # Every 10 matches (10 players each)
-                    append_rows(batch_data)
-                    batch_data = [] # Reset batch
-                    print(f"💾 Checkpoint reached. Matches saved to {RAW_DATA_PATH}")
+        batch_data = []
+        for i, m_id in enumerate(match_ids):
+            data = process_match_data(routing, m_id)
+            processed_ids.add(m_id)
+            if data:
+                batch_data.extend(data)
 
-                time.sleep(1.2)
-
-            # Final save for the remaining data in the region
-            if batch_data:
+            # Check-pointing: Save every 10 matches so we don't lose data on crash
+            if len(batch_data) >= 100: # Every 10 matches (10 players each)
                 append_rows(batch_data)
+                batch_data = [] # Reset batch
+                print(f"💾 Checkpoint reached. Matches saved to {RAW_DATA_PATH}")
 
-        new_count = len(processed_ids) - initial_count
-        print(f"✨ Automation Cycle Complete. {new_count} new match IDs processed. Data stored in {RAW_DATA_PATH}")
-        if new_count == 0:
-            print("⚠️ No new matches collected this run.")
+            time.sleep(REQUEST_DELAY)
+
+        # Final save for the remaining data in the region
+        if batch_data:
+            append_rows(batch_data)
+
+    new_count = len(processed_ids) - initial_count
+    print(f"✨ Automation Cycle Complete. {new_count} new match IDs processed. Data stored in {RAW_DATA_PATH}")
+    if new_count == 0:
+        print("⚠️ No new matches collected this run.")

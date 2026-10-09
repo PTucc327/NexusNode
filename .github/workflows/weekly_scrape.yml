@@ -16,7 +16,7 @@ concurrency:
 jobs:
   pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
     - name: Checkout Repository
@@ -38,6 +38,12 @@ jobs:
     - name: 1. Run Scraper (Raw Data)
       env:
         RIOT_KEY: ${{ secrets.RIOT_KEY }}
+        # Scale knobs (see collect_data.py). With a production key, lower
+        # RIOT_REQUEST_DELAY and raise the limits.
+        PLAYERS_PER_TIER: '40'
+        MATCHES_PER_PLAYER: '20'
+        MAX_NEW_MATCHES_PER_REGION: '500'
+        RIOT_REQUEST_DELAY: '1.2'
       run: python modules/collect_data.py
 
     - name: 2. Run EDA (Cleaning & Role Fixes)

@@ -100,6 +100,9 @@ st.markdown("""
 .reasons li.weak { border-left: 3px solid #dc2626; }
 .reasons li.lane { border-left: 3px solid #a855f7; }
 .reasons li.meta { border-left: 3px solid #f59e0b; }
+.reasons li.comp { border-left: 3px solid #0ea5e9; }
+.reasons li.risk { border-left: 3px solid #dc2626; }
+.reasons li.safe { border-left: 3px solid #16a34a; }
 .pool-row { display:flex; flex-wrap:wrap; gap:4px; margin:.25rem 0 .5rem 0; }
 </style>
 """, unsafe_allow_html=True)
@@ -187,7 +190,14 @@ with st.sidebar:
 # --- 7. DRAFT BOARD ---
 st.title("🎮 NexusNode Draft Assistant")
 st.caption("Fill in bans and the picks you know. Recommendations for your role update instantly, "
-           "factoring in role strength, your lane matchup, and the rest of both teams.")
+           "factoring in role strength, your lane matchup, "
+           + ("team composition, " if engine.profiles is not None else "") + "and the rest of both teams.")
+_m = engine.metrics
+if _m.get("patches"):
+    _hl = _m.get("patch_half_life")
+    st.caption(f"📅 Based on {_m.get('matches', '?'):,} high-Elo Ranked Solo games from patches "
+               f"{_m['patches'][0]}–{_m['patches'][1]} (model trained {_m.get('trained_at', '?')})"
+               + (f"; recent patches count more (half-life {_hl} patches)." if _hl else "."))
 
 
 def slot_options(role):
@@ -252,7 +262,15 @@ allies = {r: c for r, c in blue.items() if r != user_role}
 recs = engine.recommend(user_role, allies, red, comfort_pool=comfort, banned=bans,
                         comfort_bonus=comfort_bonus, enemy_weight=enemy_weight)
 
+lane_opp = red.get(user_role)
 st.subheader(f"{ROLE_ICONS[user_role]} Best {ROLE_LABELS[user_role]} picks for this draft")
+if lane_opp:
+    st.info(f"🎯 **Counter pick**: your lane opponent is **{name(lane_opp)}**. Picks are scored directly "
+            "against them and the rest of the enemy team.")
+else:
+    st.info(f"🛡️ **Blind pick**: the enemy {ROLE_LABELS[user_role]} hasn't picked yet. Win % is the average "
+            f"against the most-played {ROLE_LABELS[user_role]} champions still available, and picks that "
+            "get hard-countered by one of them are ranked lower.")
 if not recs:
     st.info(f"No eligible {ROLE_LABELS[user_role]} champions found in the model data.")
 else:
@@ -303,26 +321,35 @@ else:
             "Best synergy": top_name(r.synergy),
             "Strong vs": top_name(r.counters),
             "Weak vs": top_name(r.counters, positive=False),
+            **({"Countered by": name(r.counter_risk_by) if r.counter_risk <= -0.005 else "",
+                "Counter risk": r.counter_risk * 100} if r.blind else {}),
         } for r in recs]
         st.dataframe(rows, hide_index=True, width="stretch", column_config={
             "icon": st.column_config.ImageColumn("", width="small"),
             "Win %": st.column_config.NumberColumn(format="%.1f%%"),
             "Δ pts": st.column_config.NumberColumn(format="%+.1f"),
+            "Counter risk": st.column_config.NumberColumn(format="%+.1f"),
         })
 
 # --- 10. ABOUT THE MODEL ---
 with st.expander("🧠 How NexusNode works"):
-    st.markdown("""
+    comp_line = ("- **Team composition**: class mix, AD/AP balance and frontline for both teams (e.g. a full-AD "
+                 "team or one with no frontline), learned from match outcomes.\n") if engine.profiles is not None else ""
+    st.markdown(f"""
 NexusNode predicts which team wins from the draft, trained on high-Elo Ranked Solo games, and recommends
 the pick that maximizes your team's predicted win probability. A draft is scored from:
 
 - **Role strength**: how each champion performs *in that specific role*, shrunk toward average when
-  there are few games (so a 12-game off-role pick can't top the list)
+  there are few games (so a 12-game off-role pick can't top the list). Recent patches count more.
 - **Lane matchup**: your champion vs. the enemy in the same role, from observed head-to-head games,
-  again weighted by how many games back it up
-- **Synergy & cross-lane counters**: a relational graph neural network learns these from champions played
+  again weighted by how many games back it up.
+{comp_line}- **Synergy & cross-lane counters**: a relational graph neural network learns these from champions played
   together and against each other. With the current amount of data these effects are still small; they
   grow automatically as the weekly pipeline collects more matches.
+
+**Blind vs. counter pick.** If your lane opponent is already locked in, picks are scored directly against
+them. If not, each pick is scored against the most-played champions still available for that role, and
+picks that one of them specifically counters are ranked lower.
 
 Each component was kept only if it improved predictions on held-out matches.
 """)
@@ -330,13 +357,14 @@ Each component was kept only if it improved predictions on held-out matches.
     if m:
         v = m.get("validation", {})
         rows = [
-            ("GNN + lane matchup evidence (used)", v.get("full_model_plus_lane_evidence")),
-            ("GNN only", v.get("full_model")),
-            ("GNN without enemy terms (ablation)", v.get("allies_only_ablation")),
+            ("Full model + lane matchup evidence (used)", v.get("full_model_plus_lane_evidence")),
+            ("Full model, no lane evidence", v.get("full_model")),
+            ("Without enemy terms (ablation)", v.get("allies_only_ablation")),
             ("No draft information (side only)", v.get("baseline_side_only")),
         ]
         st.caption(f"Trained {m.get('trained_at', '?')} on {m.get('matches', '?')} matches, "
-                   f"{m.get('champions', '?')} champions. Held-out validation ({m.get('validation_matches', '?')} matches). "
+                   f"{m.get('champions', '?')} champions. Held-out validation on the "
+                   f"{'newest ' if m.get('validation_split') == 'newest' else ''}{m.get('validation_matches', '?')} matches. "
                    "Lower log loss and higher AUC are better; drafts alone only shift outcomes by a few percent.")
         st.dataframe([
             {"Model": label, "Accuracy": r.get("accuracy"), "AUC": r.get("auc"), "Log loss": r.get("log_loss")}
