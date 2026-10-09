@@ -80,7 +80,7 @@ The scraper exits with an error if the Riot API key is missing or rejected, so a
     Clone the repository:
 
     ```Bash
-    git clone https://github.com/PTuccinardi/NexusNode.git
+    git clone https://github.com/PTucc327/NexusNode.git
     cd NexusNode
     ```
 
@@ -128,4 +128,4 @@ M.S. Data Science | Pace University
 
 Philosophy: "Good, Better, Best" — iterative improvement through data.
 
-*Disclaimer: NexusNode isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games or anyone officially involved in producing or managing League of Legends.*
+*NexusNode isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games, and all associated properties are trademarks or registered trademarks of Riot Games, Inc.*

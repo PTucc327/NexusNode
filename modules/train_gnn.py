@@ -45,6 +45,10 @@ VAL_FRACTION = 0.2
 EMBED_DIM = 8
 ID_EMBED_DIM = 16
 MAX_EPOCHS = 300
+# Release gate: the weekly job publishes the model automatically, so refuse
+# to save one trained on too little data or that doesn't beat the no-draft
+# baseline on the newest held-out matches (keeps the last good model live).
+MIN_MATCHES = 1000
 PATIENCE = 40
 LR = 3e-3
 WEIGHT_DECAY = 5e-2
@@ -397,6 +401,16 @@ def train_model():
     results['baseline_side_only'] = evaluate(const_logits, val[2])
     print(f"   {'baseline_side_only':22s} | val log loss {results['baseline_side_only']['log_loss']:.4f} "
           f"| acc {results['baseline_side_only']['accuracy']:.3f}")
+
+    # --- Release gate (see MIN_MATCHES)
+    shipped, baseline = results['full_model_plus_lane_evidence'], results['baseline_side_only']
+    if len(y) < MIN_MATCHES or shipped['log_loss'] >= baseline['log_loss']:
+        print(f"❌ Release gate failed: {len(y)} matches (min {MIN_MATCHES}), val log loss "
+              f"{shipped['log_loss']:.4f} vs no-draft baseline {baseline['log_loss']:.4f}. "
+              "Keeping the existing model.")
+        sys.exit(1)
+    print(f"✅ Release gate passed: beats no-draft baseline by "
+          f"{baseline['log_loss'] - shipped['log_loss']:.4f} log loss.")
 
     # --- Final fit on ALL matches for the selected number of epochs
     print("🔁 Refitting on all matches...")

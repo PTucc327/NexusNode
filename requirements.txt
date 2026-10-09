@@ -1,11 +1,13 @@
-streamlit>=1.46
-torch>=2.4
-torch-geometric>=2.5
-numpy
-requests
-python-dotenv
-scikit-learn
-pandas
-matplotlib
-seaborn
-riotwatcher
+# Pinned to the versions the app and pipeline are tested with. Upgrade
+# deliberately (and re-run the pipeline + app checks), never implicitly.
+streamlit==1.54.0
+torch==2.11.0
+torch-geometric==2.7.0
+numpy==2.4.2
+pandas==2.3.3
+requests==2.34.2
+python-dotenv==1.2.4
+scikit-learn==1.8.0
+matplotlib==3.10.8
+seaborn==0.13.2
+riotwatcher==3.3.1

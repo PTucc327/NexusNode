@@ -1,5 +1,10 @@
 import html
+import logging
 import os
+import re
+import threading
+import time
+from collections import deque
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -26,6 +31,9 @@ def get_riot_key():
 
 
 RIOT_KEY = get_riot_key()
+LEGAL_NOTICE = ("NexusNode isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot "
+                "Games or anyone officially involved in producing or managing Riot Games properties. Riot "
+                "Games, and all associated properties are trademarks or registered trademarks of Riot Games, Inc.")
 ROLE_LABELS = {"TOP": "Top", "JUNGLE": "Jungle", "MIDDLE": "Mid", "BOTTOM": "Bot", "SUPPORT": "Support"}
 ROLE_ICONS = {"TOP": "🛡️", "JUNGLE": "🌲", "MIDDLE": "✨", "BOTTOM": "🏹", "SUPPORT": "💠"}
 
@@ -61,7 +69,7 @@ def portrait(champ, size=44, team="neutral", placeholder="?"):
     """HTML for a champion portrait, or an empty slot placeholder."""
     url = catalog.icon_url(champ) if champ else None
     if url:
-        return (f'<img class="portrait {team}" src="{url}" width="{size}" height="{size}" '
+        return (f'<img class="portrait {team}" src="{html.escape(url, quote=True)}" width="{size}" height="{size}" '
                 f'alt="{html.escape(name(champ))}" title="{html.escape(name(champ))}">')
     label = html.escape(placeholder if not champ else name(champ)[:2])
     return f'<div class="portrait empty {team}" style="width:{size}px;height:{size}px">{label}</div>'
@@ -120,29 +128,79 @@ def lock_in(role, champ):
     st.session_state[f"blue_{role}"] = champ
 
 
+# Riot ID lookups spend the app's API key, which Riot holds us responsible
+# for. Limit them per visitor and across the whole server, and cache results
+# so repeat lookups don't hit Riot at all.
+SYNC_COOLDOWN_S = 20          # per browser session
+SYNC_GLOBAL_PER_MINUTE = 30   # across all visitors of this server
+RIOT_NAME_RE = re.compile(r"^.{3,16}$")
+RIOT_TAG_RE = re.compile(r"^[A-Za-z0-9]{3,5}$")
+
+
+class _RateLimiter:
+    """Sliding-window limiter shared by all sessions in this process."""
+    def __init__(self, limit, window_s):
+        self.limit, self.window_s = limit, window_s
+        self.calls, self.lock = deque(), threading.Lock()
+
+    def allow(self):
+        now = time.monotonic()
+        with self.lock:
+            while self.calls and now - self.calls[0] > self.window_s:
+                self.calls.popleft()
+            if len(self.calls) >= self.limit:
+                return False
+            self.calls.append(now)
+            return True
+
+
+@st.cache_resource
+def sync_limiter():
+    return _RateLimiter(SYNC_GLOBAL_PER_MINUTE, 60)
+
+
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=1000)
+def fetch_comfort_pool(game_name, tag, region):
+    """Top-mastery champions for a Riot ID (None if the account doesn't exist).
+    Cached for an hour; mastery data is public and changes slowly."""
+    ri = RiotInterface(RIOT_KEY, region=region, catalog=catalog)
+    puuid = ri.get_puuid(game_name, tag)
+    if not puuid:
+        return None
+    return ri.get_user_comfort_pool(puuid)
+
+
 def sync_profile():
     # Read from session state: callback args are bound at render time and
     # would miss an ID typed just before clicking.
     riot_id = st.session_state.get("riot_id", "")
     region = st.session_state.get("riot_region", "na1")
     game_name, _, tag = riot_id.strip().rpartition("#")
-    if not game_name or not tag:
-        st.session_state["sync_msg"] = ("error", "Enter your Riot ID as Name#Tag.")
+    if not RIOT_NAME_RE.match(game_name) or not RIOT_TAG_RE.match(tag) or region not in PLATFORM_ROUTING:
+        st.session_state["sync_msg"] = ("error", "Enter your Riot ID as Name#Tag (e.g. Faker#KR1).")
         return
+    wait = SYNC_COOLDOWN_S - (time.monotonic() - st.session_state.get("last_sync", -1e9))
+    if wait > 0:
+        st.session_state["sync_msg"] = ("warning", f"Please wait {wait:.0f}s before importing again.")
+        return
+    if not sync_limiter().allow():
+        st.session_state["sync_msg"] = ("warning", "Lots of imports right now; please try again in a minute.")
+        return
+    st.session_state["last_sync"] = time.monotonic()
     try:
-        ri = RiotInterface(RIOT_KEY, region=region, catalog=catalog)
-        puuid = ri.get_puuid(game_name, tag)
-        if not puuid:
-            st.session_state["sync_msg"] = ("error", f"No account found for {riot_id}.")
+        names = fetch_comfort_pool(game_name, tag, region)
+        if names is None:
+            st.session_state["sync_msg"] = ("error", "No account found for that Riot ID on this server.")
             return
-        picks = [catalog.resolve(c, engine.champions) for c in ri.get_user_comfort_pool(puuid)]
-        picks = [p for p in picks if p]
+        picks = [p for p in (catalog.resolve(c, engine.champions) for c in names) if p]
         st.session_state["comfort_pool"] = picks
         st.session_state["sync_msg"] = ("success", f"Loaded {len(picks)} champions from your mastery.")
     except RiotAPIError as e:
-        st.session_state["sync_msg"] = ("error", str(e))
-    except Exception as e:
-        st.session_state["sync_msg"] = ("error", f"Sync failed: {e}")
+        st.session_state["sync_msg"] = ("error", str(e))  # our own user-safe messages
+    except Exception:
+        # Don't surface internal error details to visitors
+        logging.exception("Riot sync failed")
+        st.session_state["sync_msg"] = ("error", "Couldn't reach Riot's servers. Please try again later.")
 
 
 # --- 6. SIDEBAR ---
@@ -375,5 +433,5 @@ Each component was kept only if it improved predictions on held-out matches.
             "Log loss": st.column_config.NumberColumn(format="%.4f"),
         })
 
-st.caption("NexusNode isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games "
-           "or anyone officially involved in producing or managing League of Legends.")
+# Exact legal boilerplate required by Riot's developer policies
+st.caption(LEGAL_NOTICE)
