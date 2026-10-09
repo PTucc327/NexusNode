@@ -5,11 +5,8 @@ import os
 ROLES = ['TOP', 'JUNGLE', 'MIDDLE', 'BOTTOM', 'SUPPORT']
 RANKED_SOLO_QUEUE_ID = 420
 
-def clean_data():
-    # Define paths based on your new directory structure
-    input_path = './data/raw/league_match_data.csv'
-    output_path = './data/processed/cleaned_league_match_data.csv'
-
+def clean_data(input_path='./data/raw/league_match_data.csv',
+               output_path='./data/processed/cleaned_league_match_data.csv'):
     if not os.path.exists(input_path):
         print(f"❌ Error: {input_path} not found. Ensure collector has run.")
         return

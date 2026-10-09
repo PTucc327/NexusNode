@@ -1,0 +1,9 @@
+# Runtime-only dependencies for serving the app (pinned). The training
+# pipeline's extra libraries (torch-geometric, scikit-learn, riotwatcher,
+# plotting) are deliberately excluded: smaller image, smaller attack surface.
+# torch is installed separately from the CPU wheel index (see Dockerfile).
+streamlit==1.54.0
+numpy==2.4.2
+pandas==2.3.3
+requests==2.34.2
+python-dotenv==1.2.4

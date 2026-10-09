@@ -33,7 +33,7 @@ jobs:
         python -m pip install --upgrade pip
         # CPU-only torch wheels are ~10x smaller than the default CUDA build
         pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
-        pip install -r requirements.txt
+        pip install -r requirements.txt -r requirements-dev.txt
 
     - name: 1. Run Scraper (Raw Data)
       env:
@@ -55,7 +55,12 @@ jobs:
     - name: 4. Run GNN Training (Draft Model)
       run: python modules/train_gnn.py
 
-    - name: 5. Refresh Champion Metadata Snapshot (names/icons)
+    - name: 5. Run Tests Against the New Model (blocks the commit on failure)
+      env:
+        NEXUSNODE_OFFLINE: '1'
+      run: python -m pytest tests -q
+
+    - name: 6. Refresh Champion Metadata Snapshot (names/icons)
       run: python modules/champions.py || echo "Data Dragon unavailable, keeping existing snapshot"
 
     - name: Commit and Push All Changes

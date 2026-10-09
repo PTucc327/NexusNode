@@ -1,0 +1,21 @@
+# Never send secrets or private notes into the build context
+.env
+*.env
+.streamlit/secrets.toml
+secrets.json
+RIOT_REGISTRATION_DRAFT.md
+
+# Not needed at runtime
+.git
+.github
+.devcontainer
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+tests
+notebooks
+images
+data/raw
+README.md

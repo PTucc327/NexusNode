@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from modules.champions import ChampionCatalog, fetch_ddragon
 from modules.engine import DraftingEngine, ROLES
 from modules.riot_api import RiotInterface, RiotAPIError, PLATFORM_ROUTING
+from modules.lcu import LCUClient, LCUError, parse_session, assign_enemy_roles
 
 # --- 1. PAGE CONFIG (must be the first Streamlit call) ---
 st.set_page_config(page_title="NexusNode | Draft Assistant", layout="wide", page_icon="🎮")
@@ -31,6 +32,11 @@ def get_riot_key():
 
 
 RIOT_KEY = get_riot_key()
+# Desktop companion mode: reads the LOCAL League client's champ select
+# (read-only; see modules/lcu.py). Off unless explicitly enabled, and never
+# meaningful on a hosted server. Riot must acknowledge League Client API use
+# before this is released to players.
+DESKTOP_MODE = os.getenv('NEXUSNODE_DESKTOP') == '1'
 LEGAL_NOTICE = ("NexusNode isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot "
                 "Games or anyone officially involved in producing or managing Riot Games properties. Riot "
                 "Games, and all associated properties are trademarks or registered trademarks of Riot Games, Inc.")
@@ -203,11 +209,81 @@ def sync_profile():
         st.session_state["sync_msg"] = ("error", "Couldn't reach Riot's servers. Please try again later.")
 
 
+# --- 5b. LEAGUE CLIENT SYNC (desktop mode) ---
+@st.cache_resource
+def champion_ids():
+    """Numeric champion id (as the client reports it) -> this model's champion name."""
+    ids = {}
+    for cid, dd_name in catalog._by_numeric_id.items():
+        name_ = catalog.resolve(dd_name, engine.champions)
+        if name_:
+            ids[cid] = name_
+    return ids
+
+
+def draft_from_client(state):
+    """Widget values for a parsed champ-select state (full sync, so slots the
+    client shows as empty are cleared too)."""
+    updates = {}
+    if state.my_role:
+        updates["user_role"] = state.my_role
+    for r in ROLES:
+        updates[f"blue_{r}"] = state.allies.get(r)
+    if state.my_role:
+        updates[f"blue_{state.my_role}"] = state.my_pick
+    enemy_roles = assign_enemy_roles(state.enemies, engine.role_games)
+    for r in ROLES:
+        updates[f"red_{r}"] = enemy_roles.get(r)
+    updates["bans"] = [b for b in state.bans if b in engine.index]
+    return updates
+
+
+# Apply client updates BEFORE any widget is created this run (Streamlit only
+# allows setting a widget's value before it's instantiated).
+for _key, _value in st.session_state.pop("lcu_pending", {}).items():
+    st.session_state[_key] = _value
+
+
+@st.fragment(run_every=2)
+def league_client_sync():
+    if not st.session_state.get("lcu_on"):
+        return
+    client = LCUClient.from_lockfile()
+    if client is None:
+        st.caption("⚪ League client isn't running.")
+        return
+    try:
+        session = client.champ_select_session()
+    except (LCUError, OSError, ValueError) as e:
+        logging.warning("League client read failed: %s", e)
+        st.caption("🟠 Can't read the League client right now.")
+        return
+    if session is None:
+        st.caption("⚪ Waiting for champion select…")
+        return
+    updates = draft_from_client(parse_session(session, champion_ids().get))
+    changed = {k: v for k, v in updates.items() if st.session_state.get(k) != v}
+    if changed:
+        st.session_state["lcu_pending"] = changed
+        st.rerun(scope="app")
+    st.caption("🟢 Live: synced with champion select (read-only).")
+
+
 # --- 6. SIDEBAR ---
 with st.sidebar:
+    if DESKTOP_MODE:
+        st.header("📡 League client")
+        st.toggle("Sync with champion select", key="lcu_on",
+                  help="Reads your own champ select (picks, bans, your role) from the League client on "
+                       "this computer. Read-only: it never picks, bans or clicks anything for you.")
+        league_client_sync()
+        st.divider()
     st.header("🎯 Your role")
+    # Only pass a default when nothing (e.g. the League client sync) has set
+    # the role yet; Streamlit warns if a widget gets both.
     user_role = st.segmented_control(
-        "Your role", ROLES, default="BOTTOM", key="user_role", label_visibility="collapsed",
+        "Your role", ROLES, default=None if "user_role" in st.session_state else "BOTTOM",
+        key="user_role", label_visibility="collapsed",
         format_func=lambda r: f"{ROLE_ICONS[r]} {ROLE_LABELS[r]}",
     ) or "BOTTOM"
 

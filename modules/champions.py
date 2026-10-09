@@ -22,8 +22,11 @@ def _key(name):
 
 def fetch_ddragon():
     """Returns {'version': str, 'champions': {ddragon_id: {'name', 'key', 'tags', 'info'}}}
-    from the live CDN, falling back to the bundled snapshot."""
+    from the live CDN, falling back to the bundled snapshot. Set
+    NEXUSNODE_OFFLINE=1 to always use the snapshot (tests, offline use)."""
     try:
+        if os.getenv('NEXUSNODE_OFFLINE'):
+            raise RuntimeError('offline mode')
         version = requests.get(DDRAGON_VERSIONS_URL, timeout=REQUEST_TIMEOUT).json()[0]
         data = requests.get(DDRAGON_CHAMPIONS_URL.format(version=version), timeout=REQUEST_TIMEOUT).json()['data']
         return {

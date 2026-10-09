@@ -327,6 +327,12 @@ def fit(model, x, graph, blue, red, y, epochs, val=None, weight=None):
     return best[0], best[1]
 
 
+def passes_release_gate(n_matches, shipped_log_loss, baseline_log_loss, min_matches=None):
+    """True if a newly trained model may replace the published one."""
+    min_matches = MIN_MATCHES if min_matches is None else min_matches
+    return n_matches >= min_matches and shipped_log_loss < baseline_log_loss
+
+
 def train_model():
     if not os.path.exists(INPUT_PATH):
         print("❌ Error: Cleaned match data not found. Run eda.py and preprocess.py first.")
@@ -404,7 +410,7 @@ def train_model():
 
     # --- Release gate (see MIN_MATCHES)
     shipped, baseline = results['full_model_plus_lane_evidence'], results['baseline_side_only']
-    if len(y) < MIN_MATCHES or shipped['log_loss'] >= baseline['log_loss']:
+    if not passes_release_gate(len(y), shipped['log_loss'], baseline['log_loss']):
         print(f"❌ Release gate failed: {len(y)} matches (min {MIN_MATCHES}), val log loss "
               f"{shipped['log_loss']:.4f} vs no-draft baseline {baseline['log_loss']:.4f}. "
               "Keeping the existing model.")

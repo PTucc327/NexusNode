@@ -102,6 +102,31 @@ The scraper exits with an error if the Riot API key is missing or rejected, so a
 ```Bash
 streamlit run app.py
 ```
+
+### Tests
+The suite covers the engine's guarantees (swapping teams flips the prediction, bans are never recommended, blind/counter modes), the data pipeline, the UI end to end, the League client reader, and security guards (no API keys in tracked files, pinned dependencies and actions, XSRF protection on, no player identifiers stored). It runs on every push, and the weekly pipeline runs it on each new model before committing.
+
+```Bash
+pip install -r requirements-dev.txt
+NEXUSNODE_OFFLINE=1 python -m pytest tests
+```
+
+### Deployment (container)
+`requirements-app.txt` holds only what the app needs at runtime. The image runs as a non-root user, hides error details from visitors, keeps XSRF protection on, and never contains secrets: provide `RIOT_KEY` at runtime from your host's secrets manager.
+
+```Bash
+docker build -t nexusnode .
+docker run -p 8501:8501 -e RIOT_KEY=... nexusnode
+```
+
+Per Riot's developer policies, register the product on the Developer Portal before any public launch.
+
+### Desktop mode (League client sync, in development)
+With `NEXUSNODE_DESKTOP=1`, the sidebar offers **Sync with champion select**, which fills in your role, both teams and bans from the League client running on your computer. It is read-only by construction: one allow-listed endpoint, only visible picks and bans are parsed (never player identities), and TLS is pinned to Riot's certificate authority. Riot requires League Client API use to be listed on the product's Developer Portal page and acknowledged **before** release, so this mode is for local development until then.
+
+```Bash
+NEXUSNODE_DESKTOP=1 streamlit run app.py
+```
 ---
 
 ## 🧪 Model Performance
