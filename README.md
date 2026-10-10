@@ -44,7 +44,7 @@ The project is structured as a modular MLOps Pipeline:
 
   Every component and setting is kept only if it improves log loss on the **newest** held-out matches (rolling time-based validation, averaged over seeds where effects are small). With the current data, cross-validation showed lane matchups are the only pairwise signal that generalizes. Observed cross-role counters and teammate synergy made predictions worse, and the GNN's interaction terms are regularized to near zero. They grow as more data arrives.
 
-- Deployment (app.py, engine.py): A Streamlit draft assistant with champion portraits (Data Dragon), bans, a live win-probability bar, and ranked recommendations explained by role strength (with sample size), team composition, lane matchup records, and synergy/counters relative to the other options. A damage meter shows each team's real physical/magic split and flags very one-sided teams.
+- Deployment (app.py, engine.py): A Streamlit draft assistant with champion portraits (Data Dragon), bans, a live win-probability bar, and ranked recommendations explained by role strength (with sample size), team composition, lane matchup records, and synergy/counters relative to the other options. A damage meter shows each team's real physical/magic split and flags very one-sided teams. Picks within 0.5 points of the best are labelled **tied for best**, and a **From your pool** row shows the player's best options among the champions they play, with their overall rank.
 
   - **Counter pick**: when your lane opponent is locked in, picks are scored directly against them.
   - **Blind pick**: otherwise, picks are scored against the 12 most-played champions still available for that role, and picks that one of them specifically counters (worse than other picks fare against it) are ranked lower and flagged ("Countered by Jayce").
@@ -134,13 +134,39 @@ Trained on 4,454 Ranked Solo games from patches 16.6–16.20, 173 champions. Val
 
 | Model | Log loss ↓ | AUC ↑ |
 |---|---|---|
-| **Full model + lane matchup evidence (shipped)** | **0.6900** | **0.539** |
-| Full model, no lane evidence | 0.6906 | 0.534 |
-| Without enemy terms (ablation) | 0.6916 | 0.523 |
+| **Full model + lane matchup evidence (shipped)** | **0.6897** | **0.544** |
+| Full model, no lane evidence | 0.6902 | 0.541 |
+| Without enemy terms (ablation) | 0.6911 | 0.531 |
 | No draft information (side bias only) | 0.6926 | 0.500 |
 
-- Hyperparameters, shrinkage strengths, recency half-life and the composition features were chosen by rolling time-based validation.
-- Draft-only prediction is a low-signal problem (player skill and execution dominate at Challenger), so the model's job is to rank picks by a few points of win probability, not to call games. Pairwise effects (synergy, cross-lane counters) should become visible as the weekly pipeline grows the dataset.
+### Do the recommendations point to winning picks?
+For every player in the 890 held-out games, we ranked their actual champion among all options for their role, given the other nine champions, using a model trained only on older games:
+
+| Where the model ranked the champion they played | Picks | Won |
+|---|---|---|
+| **Model's top 5** | 899 | **52.8%** |
+| Top third | 2,858 | 50.9% (±1.8) |
+| Middle third | 2,508 | 50.8% (±2.0) |
+| Bottom third | 2,878 | 48.8% (±1.8) |
+
+Picks the model favors win more often, by a few points rather than a landslide (the thirds' confidence intervals overlap). Only 11% of real Challenger picks fall in the model's top 5: players mostly pick from their own champion pool, which is why the app shows a separate **From your pool** row.
+
+### Are the win percentages honest?
+Scored from both teams' perspectives (so the blue/red side effect cancels), held-out predictions match reality closely:
+
+| Model predicted | Actually won | Games |
+|---|---|---|
+| 44.6% | 44.4% | 356 |
+| 47.9% | 46.3% | 356 |
+| 50.0% | 50.0% | 356 |
+| 52.1% | 53.7% | 356 |
+| 55.4% | 55.6% | 356 |
+
+A calibration temperature (currently 1.04, where 1.00 means no adjustment) is re-fitted on held-out games at every weekly retrain and applied to the win % users see.
+
+### Notes
+- Hyperparameters, shrinkage strengths, recency half-life and the composition features were chosen by rolling time-based validation, averaged over several random seeds where effects are small.
+- Draft-only prediction is a low-signal problem (player skill and execution dominate at Challenger), so the model's job is to rank picks by a few points of win probability, not to call games. Picks within 0.5 points of the best are shown as tied, since the model can't reliably separate smaller gaps. Pairwise effects (synergy, cross-lane counters) should become visible as the weekly pipeline grows the dataset.
 
 ![performance](./images/LinkedinPostImage2.png)
 ---
