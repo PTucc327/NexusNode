@@ -352,6 +352,23 @@ def fit(model, x, graph, blue, red, y, epochs, val=None, weight=None):
     return best[0], best[1]
 
 
+def fit_temperature(logits, y):
+    """Calibration: the single temperature T that makes sigmoid(logit / T) best
+    match held-out outcomes (log loss). T > 1 shrinks overconfident
+    predictions toward 50%. Monotonic, so it never changes which pick ranks
+    higher, only how confident the displayed win % is."""
+    grid = torch.linspace(0.5, 4.0, 351)
+    losses = torch.stack([F.binary_cross_entropy_with_logits(logits / t, y) for t in grid])
+    return float(grid[int(torch.argmin(losses))])
+
+
+def calibration_table(probs, y, bins=5):
+    """Predicted vs actual win rate by quantile bin, for the metrics report."""
+    order = torch.argsort(probs)
+    return [{'predicted': float(probs[idx].mean()), 'actual': float(y[idx].mean()), 'n': int(len(idx))}
+            for idx in torch.tensor_split(order, bins)]
+
+
 def passes_release_gate(n_matches, shipped_log_loss, baseline_log_loss, min_matches=None):
     """True if a newly trained model may replace the published one."""
     min_matches = MIN_MATCHES if min_matches is None else min_matches
@@ -422,7 +439,24 @@ def train_model():
         base_val = full_model(z_tr, *val[:2])
     effects = lane_evidence(blue[train_idx], red[train_idx], y[train_idx], base_tr, weight=weight_train)
     results['full_model_refit'] = evaluate(base_val, val[2])
-    results['full_model_plus_lane_evidence'] = evaluate(base_val + apply_lane_evidence(*val[:2], effects), val[2])
+    shipped_val = base_val + apply_lane_evidence(*val[:2], effects)
+    results['full_model_plus_lane_evidence'] = evaluate(shipped_val, val[2])
+
+    # Calibrate what users see: side-neutral logits (the app doesn't know your
+    # side), temperature fitted on these held-out matches.
+    # Score each match from BOTH teams' perspectives so the blue/red side
+    # effect cancels (otherwise blue side's lower win rate looks like
+    # miscalibration).
+    neutral_val = shipped_val - full_model.side_bias.detach()
+    sym_logits = torch.cat([neutral_val, -neutral_val])
+    sym_y = torch.cat([val[2], 1 - val[2]])
+    temperature = fit_temperature(sym_logits, sym_y)
+    calibration = {
+        'temperature': temperature,
+        'before': calibration_table(torch.sigmoid(sym_logits), sym_y),
+        'after': calibration_table(torch.sigmoid(sym_logits / temperature), sym_y),
+    }
+    print(f"   calibration temperature {temperature:.2f} (>1 = predictions were overconfident)")
     for name in ('full_model_refit', 'full_model_plus_lane_evidence'):
         r = results[name]
         print(f"   {name:22s} | val log loss {r['log_loss']:.4f} | acc {r['accuracy']:.3f} | AUC {r['auc']:.3f}")
@@ -473,6 +507,7 @@ def train_model():
             # Lane matchup evidence: rows (champ_a, champ_b, role) with a<=b
             'lane_evidence_keys': torch.tensor(lane_keys, dtype=torch.long),
             'lane_evidence': torch.tensor([effects[k] for k in lane_keys], dtype=torch.float),
+            'calibration_temperature': torch.tensor(temperature),
         }
 
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
@@ -486,6 +521,7 @@ def train_model():
         'patches': [patches[0], patches[-1]] if patches else None,
         'patch_half_life': PATCH_HALF_LIFE,
         'use_composition': bool(model.use_composition),
+        'calibration': calibration,
         'validation': results,
     }
     with open(METRICS_PATH, 'w') as f:

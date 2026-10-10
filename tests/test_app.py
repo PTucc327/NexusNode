@@ -174,3 +174,16 @@ def test_damage_meter_warns_on_one_sided_team(app):
     app.run()
     html = ' '.join(m.value for m in app.markdown)
     assert 'Very AD-heavy' in html and 'Physical' in html
+
+
+def test_pool_row_prompts_when_empty(app):
+    assert any('to see your best options for this draft' in c.value for c in app.caption)
+    assert not [b for b in app.button if b.key and b.key.startswith('lockpool_')]
+
+
+def test_pool_row_shows_your_champions(app):
+    app.multiselect(key='comfort_pool').select('Jhin').select('Ashe').select('Thresh').run()
+    pool_buttons = {b.key.removeprefix('lockpool_') for b in app.button if b.key and b.key.startswith('lockpool_')}
+    assert pool_buttons == {'Jhin', 'Ashe'}  # Thresh isn't a Bot laner in the data
+    assert any('Not shown' in c.value and 'Thresh' in c.value for c in app.caption)
+    assert not app.exception

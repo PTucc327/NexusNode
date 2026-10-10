@@ -119,6 +119,9 @@ st.markdown("""
 .reasons li.weak { border-left: 3px solid #dc2626; }
 .reasons li.lane { border-left: 3px solid #a855f7; }
 .reasons li.meta { border-left: 3px solid #f59e0b; }
+.tie-badge { display:inline-block; margin-top:.25rem; padding:1px 8px; border-radius:999px; font-size:.7rem;
+  font-weight:600; background: rgba(245,158,11,.15); color:#b45309; }
+.pool-title { font-weight:700; font-size:1.05rem; margin: 1.2rem 0 .2rem 0; }
 .reasons li.comp { border-left: 3px solid #0ea5e9; }
 .reasons li.risk { border-left: 3px solid #dc2626; }
 .reasons li.safe { border-left: 3px solid #16a34a; }
@@ -300,7 +303,7 @@ with st.sidebar:
 
     st.divider()
     st.header("⭐ Champion pool")
-    st.caption("Champions you're comfortable on get a ranking bonus.")
+    st.caption("Champions you play get their own \"From your pool\" row under the recommendations.")
     comfort = st.multiselect("Comfort picks", champ_list, key="comfort_pool", format_func=name,
                              placeholder="Add champions…", label_visibility="collapsed")
     if comfort:
@@ -325,9 +328,6 @@ with st.sidebar:
             "Enemy awareness", 0.0, 2.0, 1.0, step=0.1,
             help="Scales how much the enemy team's champions affect the ranking. "
                  "1.0 = as learned from match data, 0 = ignore enemies entirely.")
-        comfort_bonus = st.slider(
-            "Comfort bonus (win-prob points)", 0.0, 10.0, 3.0, step=0.5,
-            help="Ranking boost for champions in your pool. Displayed win probability is unaffected.") / 100
 
     st.button("🧹 Reset draft", on_click=reset_draft, width="stretch")
 
@@ -426,7 +426,9 @@ if p_now is not None:
 # --- 9. RECOMMENDATIONS ---
 allies = {r: c for r, c in blue.items() if r != user_role}
 recs = engine.recommend(user_role, allies, red, comfort_pool=comfort, banned=bans,
-                        comfort_bonus=comfort_bonus, enemy_weight=enemy_weight)
+                        comfort_bonus=0.0, enemy_weight=enemy_weight)  # comfort has its own row
+# Pool champions that can't be picked right now (banned or already in the draft)
+banned_or_taken = set(bans) | {c for c in allies.values() if c} | {c for c in red.values() if c}
 
 lane_opp = red.get(user_role)
 st.subheader(f"{ROLE_ICONS[user_role]} Best {ROLE_LABELS[user_role]} picks for this draft")
@@ -450,27 +452,56 @@ else:
                + f". Δ is compared with the average {ROLE_LABELS[user_role]} option; "
                "numbers in reasons are each champion's effect in win-probability points.")
 
-    cols = st.columns(5)
-    for i, (rec, col) in enumerate(zip(recs[:5], cols)):
+    n_tied = sum(r.tied_best for r in recs)
+    rank_of = {r.champion: i + 1 for i, r in enumerate(recs)}
+
+    def rec_card(rec, key_prefix):
         delta = rec.win_prob - avg_p
         reasons = DraftingEngine.reasons(rec, display=name)
         reason_html = "".join(f'<li class="{k}">{html.escape(t)}</li>' for k, t in reasons) \
             or '<li>Solid overall pick</li>'
         star = " ⭐" if rec.is_comfort else ""
-        with col:
-            st.markdown(f"""
-<div class="rec-card {'top' if i == 0 else ''}">
-  <div class="rec-rank">#{i + 1}</div>
+        tied = rec.tied_best and n_tied > 1
+        badge = '<div class="tie-badge">≈ Tied for best</div>' if tied else ""
+        st.markdown(f"""
+<div class="rec-card {'top' if rec.tied_best else ''}">
+  <div class="rec-rank">#{rank_of[rec.champion]}</div>
   {portrait(rec.champion, 72, 'blue')}
   <div class="rec-name">{html.escape(name(rec.champion))}{star}</div>
   <div class="rec-wp">{rec.win_prob:.1%}</div>
   <div class="rec-delta {'pos' if delta >= 0 else 'neg'}">{delta * 100:+.1f} pts Δ</div>
+  {badge}
   <ul class="reasons">{reason_html}</ul>
 </div>""", unsafe_allow_html=True)
-            locked = blue.get(user_role) == rec.champion
-            st.button("✅ Locked in" if locked else "Lock in", key=f"lock_{rec.champion}",
-                      on_click=lock_in, args=(user_role, rec.champion), disabled=locked,
-                      width="stretch")
+        locked = blue.get(user_role) == rec.champion
+        st.button("✅ Locked in" if locked else "Lock in", key=f"{key_prefix}_{rec.champion}",
+                  on_click=lock_in, args=(user_role, rec.champion), disabled=locked,
+                  width="stretch")
+
+    if n_tied > 1:
+        st.caption(f"**{n_tied} picks are within 0.5 pts of the best**, which is closer than the model can reliably "
+                   "tell apart. Treat them as equally good and go with what you play best.")
+    for rec, col in zip(recs[:5], st.columns(5)):
+        with col:
+            rec_card(rec, "lock")
+
+    # --- Best options from the player's own pool -------------------------
+    st.markdown('<div class="pool-title">⭐ From your pool</div>', unsafe_allow_html=True)
+    pool_recs = [r for r in recs if r.is_comfort][:5]
+    if not comfort:
+        st.caption("Add champions you play to your pool in the sidebar (or import them from your Riot account) "
+                   "to see your best options for this draft here.")
+    elif not pool_recs:
+        st.caption(f"None of your pool champions are played as {ROLE_LABELS[user_role]} enough in our data "
+                   "to recommend them here.")
+    else:
+        off_role = [c for c in comfort if c not in rank_of and c not in banned_or_taken]
+        st.caption(f"Your best {ROLE_LABELS[user_role]} options for this draft, with their overall rank."
+                   + (f" Not shown (rarely played in this role): {', '.join(name(c) for c in off_role)}."
+                      if off_role else ""))
+        for rec, col in zip(pool_recs, st.columns(5)):
+            with col:
+                rec_card(rec, "lockpool")
 
     with st.expander(f"📋 Full {ROLE_LABELS[user_role]} ranking ({len(recs)} champions)"):
         def top_name(pairs, positive=True):
@@ -484,6 +515,7 @@ else:
             "Champion": name(r.champion) + (" ⭐" if r.is_comfort else ""),
             "Win %": r.win_prob * 100,
             "Δ pts": (r.win_prob - avg_p) * 100,
+            "Tier": "Tied for best" if r.tied_best and n_tied > 1 else "",
             "Best synergy": top_name(r.synergy),
             "Strong vs": top_name(r.counters),
             "Weak vs": top_name(r.counters, positive=False),

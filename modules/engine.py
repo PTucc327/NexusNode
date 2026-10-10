@@ -25,6 +25,10 @@ BLIND_POOL = 12
 BLIND_RISK_WEIGHT = 0.5
 # Counter risk smaller than this (win-prob points) is reported as blind-safe
 BLIND_SAFE_THRESHOLD = 0.005
+# Picks within this many win-probability points of the best are presented as
+# tied: held-out tests show the model can't reliably separate smaller gaps,
+# so the player's comfort should decide between them.
+TIE_THRESHOLD = 0.005
 
 # (feature, direction of change) -> reason text. Direction matters: a mage
 # replacing the usual marksman LOWERS marksman share, which must not be
@@ -58,6 +62,8 @@ class Recommendation:
     win_prob: float              # model win probability (blind: average vs. the likely field)
     score: float                 # ranking score (risk-adjusted if blind, + comfort bonus)
     is_comfort: bool
+    model_score: float = 0.0     # ranking score before the comfort bonus
+    tied_best: bool = False      # within TIE_THRESHOLD of the best model_score
     # [(ally|enemy, Δwin-prob vs. the average candidate)], best first (+ = good for us)
     synergy: list = field(default_factory=list)
     counters: list = field(default_factory=list)
@@ -105,6 +111,9 @@ class DraftingEngine:
         self.K = art['counter'].numpy()
         self.L = art['lane'].numpy()
         # Shrunk observed lane matchup effects (logit), keyed by (id_a, id_b, role_idx), id_a <= id_b
+        # Calibration temperature fitted on held-out matches (1.0 = none)
+        temp = art.get('calibration_temperature')
+        self.temperature = float(temp) if temp is not None else 1.0
         keys = art.get('lane_evidence_keys')
         self.lane_evidence = {} if keys is None else {
             tuple(k): float(v) for k, v in zip(keys.tolist(), art['lane_evidence'].tolist())}
@@ -202,8 +211,9 @@ class DraftingEngine:
         return float((ga - gb) @ self.comp_u + enemy_weight * (ga @ self.comp_Q @ gb))
 
     def _draft_logit(self, allies, enemies, enemy_weight=1.0):
-        """Logit that `allies` beat `enemies` (both {role: champ}, may be partial)."""
-        return self._additive_logit(allies, enemies, enemy_weight) + self._comp_logit(allies, enemies, enemy_weight)
+        """Calibrated logit that `allies` beat `enemies` (both {role: champ}, may be partial)."""
+        raw = self._additive_logit(allies, enemies, enemy_weight) + self._comp_logit(allies, enemies, enemy_weight)
+        return raw / self.temperature
 
     def _comp_explain(self, allies, enemies, role, champ, enemy_weight):
         """Composition effect (logit) of `champ` in `role` vs. an average pick
@@ -294,6 +304,7 @@ class DraftingEngine:
                 champion=champ,
                 win_prob=p,
                 score=p + (comfort_bonus if is_comfort else 0.0),
+                model_score=p,
                 is_comfort=is_comfort,
                 synergy=syn_terms,
                 counters=ctr_terms,
@@ -317,6 +328,7 @@ class DraftingEngine:
                 r.counter_risk = float(min(row[worst], 0.0) * r.win_prob * (1 - r.win_prob))
                 r.counter_risk_by = field_pool[worst][0]
                 r.score += BLIND_RISK_WEIGHT * r.counter_risk
+                r.model_score += BLIND_RISK_WEIGHT * r.counter_risk
 
         # Express each effect RELATIVE to the average candidate. A strong ally
         # (e.g. a meta tank) raises every candidate's win rate; that says
@@ -327,7 +339,7 @@ class DraftingEngine:
             keys = list(getattr(recs[0], attr)) if recs else []
             means = {k: np.mean([getattr(r, attr)[k] for r in recs]) for k in keys}
             for r in recs:
-                slope = r.win_prob * (1 - r.win_prob)
+                slope = r.win_prob * (1 - r.win_prob) / self.temperature  # raw logit -> calibrated win-prob
                 rel = ((k, float((v - means[k]) * slope)) for k, v in getattr(r, attr).items())
                 setattr(r, attr, sorted(rel, key=lambda x: -x[1]))
         relative('synergy')
@@ -335,7 +347,12 @@ class DraftingEngine:
         for attr in ('meta', 'comp'):
             mean = np.mean([getattr(r, attr) for r in recs]) if recs else 0.0
             for r in recs:
-                setattr(r, attr, float((getattr(r, attr) - mean) * r.win_prob * (1 - r.win_prob)))
+                setattr(r, attr, float((getattr(r, attr) - mean) * r.win_prob * (1 - r.win_prob) / self.temperature))
+
+        if recs:
+            best = max(r.model_score for r in recs)
+            for r in recs:
+                r.tied_best = r.model_score >= best - TIE_THRESHOLD
 
         recs.sort(key=lambda r: r.score, reverse=True)
         return recs[:top_k] if top_k else recs

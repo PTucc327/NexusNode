@@ -112,3 +112,26 @@ def test_team_damage_uses_real_damage_types(engine):
     assert ap_team[1] == 3 and ap_team[0] < 0.25   # Gragas/Elise deal magic damage in games
     assert ad_team[0] > 0.75
     assert engine.team_damage({}) is None
+
+
+def test_calibration_temperature_applied(engine):
+    a, b = {'TOP': 'Gnar', 'BOTTOM': 'Jhin'}, {'MIDDLE': 'Syndra'}
+    raw = engine._additive_logit(a, b) + engine._comp_logit(a, b)
+    assert engine.temperature > 0
+    assert engine.win_probability(a, b) == pytest.approx(1 / (1 + np.exp(-raw / engine.temperature)))
+
+
+def test_near_ties_flagged_within_threshold(engine):
+    from modules.engine import TIE_THRESHOLD
+    recs = engine.recommend('BOTTOM', ALLIES, ENEMIES)
+    best = max(r.model_score for r in recs)
+    assert any(r.tied_best for r in recs)
+    for r in recs:
+        assert r.tied_best == (r.model_score >= best - TIE_THRESHOLD)
+
+
+def test_comfort_bonus_does_not_create_ties(engine):
+    recs = engine.recommend('BOTTOM', ALLIES, ENEMIES)
+    worst = recs[-1].champion
+    boosted = {r.champion: r for r in engine.recommend('BOTTOM', ALLIES, ENEMIES, comfort_pool=[worst], comfort_bonus=0.5)}
+    assert not boosted[worst].tied_best  # ranking moved, but it isn't "tied for best" on the model's own merit

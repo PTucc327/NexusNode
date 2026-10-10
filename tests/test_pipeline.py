@@ -146,3 +146,11 @@ def test_damage_skew_is_penalty_only():
     w, q = m.comp_power(), m.comp_cross_matrix()
     assert (w[T.PENALTY_ONLY] <= 0).all()
     assert torch.allclose(q[T.PENALTY_ONLY, :], torch.zeros(1)) and torch.allclose(q[:, T.PENALTY_ONLY], torch.zeros(1))
+
+
+def test_fit_temperature_recovers_overconfidence():
+    torch.manual_seed(0)
+    true_logits = torch.randn(20000) * 0.4
+    y = torch.bernoulli(torch.sigmoid(true_logits))
+    assert T.fit_temperature(true_logits * 2.0, y) == pytest.approx(2.0, abs=0.15)  # 2x overconfident
+    assert T.fit_temperature(true_logits, y) == pytest.approx(1.0, abs=0.1)        # already calibrated
