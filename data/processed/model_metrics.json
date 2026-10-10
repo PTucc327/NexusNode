@@ -1,5 +1,5 @@
 {
-  "trained_at": "2026-10-09",
+  "trained_at": "2026-10-10",
   "matches": 4454,
   "champions": 173,
   "validation_matches": 890,
@@ -12,26 +12,26 @@
   "use_composition": true,
   "validation": {
     "full_model": {
-      "log_loss": 0.690560519695282,
-      "accuracy": 0.5191011235955056,
-      "auc": 0.5336559857587896,
-      "best_epoch": 15
+      "log_loss": 0.6901759505271912,
+      "accuracy": 0.5359550561797752,
+      "auc": 0.5405641865922239,
+      "best_epoch": 23
     },
     "allies_only_ablation": {
-      "log_loss": 0.6915600299835205,
-      "accuracy": 0.503370786516854,
-      "auc": 0.5230863373386738,
-      "best_epoch": 19
+      "log_loss": 0.6910959482192993,
+      "accuracy": 0.5157303370786517,
+      "auc": 0.5307177246429582,
+      "best_epoch": 17
     },
     "full_model_refit": {
-      "log_loss": 0.690560519695282,
-      "accuracy": 0.5191011235955056,
-      "auc": 0.5336559857587896
+      "log_loss": 0.6901759505271912,
+      "accuracy": 0.5359550561797752,
+      "auc": 0.5405641865922239
     },
     "full_model_plus_lane_evidence": {
-      "log_loss": 0.6900306344032288,
-      "accuracy": 0.5280898876404494,
-      "auc": 0.5393959622931586
+      "log_loss": 0.6896836757659912,
+      "accuracy": 0.5292134831460674,
+      "auc": 0.5437553101104502
     },
     "baseline_side_only": {
       "log_loss": 0.692621111869812,

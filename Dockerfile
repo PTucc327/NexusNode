@@ -33,12 +33,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
 
 # Production settings: no tracebacks shown to visitors, XSRF protection on,
 # no Streamlit telemetry, no file uploads accepted.
-CMD streamlit run app.py \
-    --server.port=${PORT} \
-    --server.address=0.0.0.0 \
-    --server.headless=true \
-    --server.enableXsrfProtection=true \
-    --server.maxUploadSize=1 \
-    --client.showErrorDetails=none \
-    --client.toolbarMode=viewer \
-    --browser.gatherUsageStats=false
+# exec: Streamlit becomes PID 1 and receives stop signals directly (clean shutdowns)
+CMD ["sh", "-c", "exec streamlit run app.py --server.port=${PORT} --server.address=0.0.0.0 --server.headless=true --server.enableXsrfProtection=true --server.maxUploadSize=1 --client.showErrorDetails=none --client.toolbarMode=viewer --browser.gatherUsageStats=false"]

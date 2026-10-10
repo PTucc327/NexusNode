@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from modules.composition import team_features, role_mean_profiles, FEATURE_NAMES
+from modules.composition import team_features, role_mean_profiles, FEATURE_NAMES, TAGS
 
 ROLES = ['TOP', 'JUNGLE', 'MIDDLE', 'BOTTOM', 'SUPPORT']
 
@@ -30,7 +30,8 @@ BLIND_SAFE_THRESHOLD = 0.005
 # replacing the usual marksman LOWERS marksman share, which must not be
 # described as "adds a marksman".
 COMP_REASONS = {
-    ('damage_imbalance', -1): 'Balances team damage (AD/AP)',
+    ('ad_heavy', -1): 'Balances damage (team is AD-heavy)',
+    ('ap_heavy', -1): 'Balances damage (team is AP-heavy)',
     ('max_frontline', 1): 'Adds frontline',
     ('tank_share', 1): 'Adds tankiness',
     ('tank_share', -1): 'Less tank-heavy team',
@@ -41,7 +42,7 @@ COMP_REASONS = {
     ('assassin_share', 1): 'Adds pick potential',
     ('assassin_share', -1): 'Less assassin-heavy team',
     ('marksman_share', 1): 'Adds a marksman',
-    ('marksman_share', -1): 'Less marksman-reliant team',
+    ('marksman_share', -1): 'Fewer marksmen (overperforming this patch)',
     ('support_share', 1): 'Adds utility',
     ('support_share', -1): 'Less utility-heavy team',
 }
@@ -215,6 +216,15 @@ class DraftingEngine:
         contrib = diff * (self.comp_u + enemy_weight * (self.comp_Q @ gb))
         top = int(np.argmax(contrib))
         return float(contrib.sum()), (FEATURE_NAMES[top], 1 if diff[top] > 0 else -1)
+
+    def team_damage(self, picks):
+        """(physical share, champions counted) for the picked champions, from
+        the damage they actually deal in games; None if nothing is picked."""
+        picks = self._clean(picks)
+        if self.profiles is None or not picks:
+            return None
+        shares = [self.profiles[self.index[c], len(TAGS)] for c in picks.values()]
+        return float(np.mean(shares)), len(shares)
 
     def win_probability(self, allies, enemies, enemy_weight=1.0):
         allies, enemies = self._clean(allies), self._clean(enemies)

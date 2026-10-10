@@ -27,8 +27,15 @@ RAW_DATA_PATH = os.path.join('data', 'raw', 'league_match_data.csv')
 RAW_COLUMNS = [
     'match_id', 'region', 'champion_name', 'team_id', 'win', 'role', 'kills', 'deaths',
     'assists', 'damage_to_champs', 'gold_earned', 'collected_at',
-    'game_version', 'game_start', 'queue_id'
+    'game_version', 'game_start', 'queue_id',
+    # Damage TYPE to champions: the real AD/AP profile of each champion
+    'physical_damage_to_champs', 'magic_damage_to_champs', 'true_damage_to_champs'
 ]
+DAMAGE_FIELDS = {
+    'physical_damage_to_champs': 'physicalDamageDealtToChampions',
+    'magic_damage_to_champs': 'magicDamageDealtToChampions',
+    'true_damage_to_champs': 'trueDamageDealtToChampions',
+}
 
 REGIONS = {
     'na1': 'americas',
@@ -180,6 +187,7 @@ def process_match_data(routing, match_id):
             'game_version': patch_of(info.get('gameVersion')),
             'game_start': game_start,
             'queue_id': info.get('queueId'),
+            **{col: p.get(field) for col, field in DAMAGE_FIELDS.items()},
         })
     return participants
 
@@ -212,6 +220,50 @@ def backfill_metadata(checkpoint_every=100):
     save()
     print("✨ Backfill complete.")
 
+def backfill_damage(budget=800, min_games=25, checkpoint_every=100):
+    """Fills damage-type columns for a sample of existing Ranked Solo matches,
+    chosen greedily to cover the champions with the least damage data first,
+    until every champion has `min_games` observations or `budget` matches
+    have been fetched. New scrapes record damage type for every match."""
+    df = pd.read_csv(RAW_DATA_PATH, dtype=TEXT_COLUMNS)
+    have = df['physical_damage_to_champs'].notna()
+    counts = df.loc[have].groupby('champion_name').size().to_dict()
+    pending = df.loc[~have & (df['queue_id'] == RANKED_SOLO_QUEUE_ID)]
+    champs_of = pending.groupby('match_id')['champion_name'].apply(list).to_dict()
+    routing_of = pending.drop_duplicates('match_id').set_index('match_id')['region'].to_dict()
+
+    def need(m_id):
+        return sum(max(0, min_games - counts.get(c, 0)) for c in champs_of[m_id])
+
+    def save():
+        df.to_csv(RAW_DATA_PATH, index=False)
+
+    fetched = 0
+    print(f"🔎 Backfilling damage type (budget {budget} matches, target {min_games} games per champion)...")
+    while champs_of and fetched < budget:
+        m_id = max(champs_of, key=need)
+        if need(m_id) == 0:
+            break
+        champs = champs_of.pop(m_id)
+        match = fetch_match(routing_of[m_id], m_id)
+        fetched += 1
+        if match is not None:
+            for p in match['info']['participants']:
+                mask = ((df['match_id'] == m_id) & (df['champion_name'] == p['championName'])
+                        & (df['team_id'] == p['teamId']))
+                for col, field in DAMAGE_FIELDS.items():
+                    df.loc[mask, col] = p.get(field)
+            for c in champs:
+                counts[c] = counts.get(c, 0) + 1
+        if fetched % checkpoint_every == 0:
+            save()
+            short = sum(1 for c in set(df['champion_name']) if counts.get(c, 0) < min_games)
+            print(f"💾 {fetched} matches fetched; {short} champions still under {min_games} games")
+        time.sleep(REQUEST_DELAY)
+    save()
+    short = sorted(c for c in set(df['champion_name']) if counts.get(c, 0) < min_games)
+    print(f"✨ Damage backfill complete: {fetched} matches. Champions under {min_games} games: {len(short)}")
+
 def check_key():
     """Fail fast (non-zero exit) on a rejected key instead of 'succeeding' with no data."""
     try:
@@ -227,6 +279,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--backfill', action='store_true',
                         help='Fill game_version/game_start/queue_id for previously scraped matches, then exit.')
+    parser.add_argument('--backfill-damage', type=int, metavar='N', default=None,
+                        help='Fill damage-type columns for up to N existing matches (champion coverage first), then exit.')
     args = parser.parse_args()
 
     if not API_KEY:
@@ -240,6 +294,9 @@ if __name__ == "__main__":
 
     if args.backfill:
         backfill_metadata()
+        sys.exit(0)
+    if args.backfill_damage:
+        backfill_damage(budget=args.backfill_damage)
         sys.exit(0)
 
     # 2. Check for existing work

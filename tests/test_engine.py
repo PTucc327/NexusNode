@@ -104,3 +104,11 @@ def test_reasons_are_short_typed_strings(engine):
     for kind, text in DraftingEngine.reasons(rec):
         assert kind in {'meta', 'weak', 'comp', 'synergy', 'strong', 'lane', 'risk', 'safe'}
         assert isinstance(text, str) and 0 < len(text) < 120
+
+
+def test_team_damage_uses_real_damage_types(engine):
+    ap_team = engine.team_damage({'TOP': 'Gragas', 'JUNGLE': 'Elise', 'MIDDLE': 'Syndra'})
+    ad_team = engine.team_damage({'TOP': 'Darius', 'MIDDLE': 'Zed', 'BOTTOM': 'Jhin'})
+    assert ap_team[1] == 3 and ap_team[0] < 0.25   # Gragas/Elise deal magic damage in games
+    assert ad_team[0] > 0.75
+    assert engine.team_damage({}) is None

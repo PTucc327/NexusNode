@@ -149,3 +149,28 @@ def test_league_client_not_running(monkeypatch):
     at.toggle(key='lcu_on').set_value(True).run()
     assert any("isn't running" in c.value for c in at.caption)
     assert not at.exception
+
+
+def test_league_client_blind_mode_uses_selected_role(monkeypatch):
+    from modules.lcu import LCUClient
+    session = {'localPlayerCellId': 0,
+               'myTeam': [{'cellId': 0, 'championId': 22, 'assignedPosition': ''}],
+               'theirTeam': [], 'bans': {}, 'actions': []}
+    monkeypatch.setenv('NEXUSNODE_DESKTOP', '1')
+    monkeypatch.setattr(LCUClient, 'from_lockfile', classmethod(lambda cls, path=None: _FakeClient(session)))
+    at = AppTest.from_function(_run_app, default_timeout=60).run()
+    at.radio(key='user_role').set_value('MIDDLE').run()
+    at.multiselect(key='comfort_pool').select('Ahri').run()
+    at.toggle(key='lcu_on').set_value(True).run()
+    assert at.session_state['user_role'] == 'MIDDLE'      # not overridden
+    assert at.session_state['comfort_pool'] == ['Ahri']   # other settings survive the sync rerun
+    assert at.session_state['blue_MIDDLE'] == 'Ashe'      # your pick lands in your chosen role
+    assert not at.exception
+
+
+def test_damage_meter_warns_on_one_sided_team(app):
+    for role, champ in [('TOP', 'Darius'), ('MIDDLE', 'Zed'), ('BOTTOM', 'Jhin')]:
+        app.selectbox(key=f'blue_{role}').select(champ)
+    app.run()
+    html = ' '.join(m.value for m in app.markdown)
+    assert 'Very AD-heavy' in html and 'Physical' in html

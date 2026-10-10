@@ -77,6 +77,9 @@ def test_client_only_talks_to_localhost():
 def test_tls_trusts_only_riot_ca_and_requires_verification():
     ctx = lcu._pinned_context()
     assert ctx.verify_mode == ssl.CERT_REQUIRED
+    assert ctx.check_hostname  # client cert lists 127.0.0.1 in its SAN
+    # Only X509 strict mode is relaxed (Riot's 2013 CA lacks an AKI extension)
+    assert not ctx.verify_flags & getattr(ssl, 'VERIFY_X509_STRICT', 0)
     cas = ctx.get_ca_certs()
     assert len(cas) == 1
     subject = dict(x[0] for x in cas[0]['subject'])
@@ -102,3 +105,20 @@ def test_lockfile_parsing(tmp_path):
     bad.write_text('garbage')
     assert lcu.read_lockfile(str(bad)) is None
     assert lcu.read_lockfile(str(tmp_path / 'missing')) is None
+
+
+def test_blind_mode_session_without_roles():
+    """Practice Tool / Blind Pick: no assigned positions, no bans, no enemies."""
+    session = {'localPlayerCellId': 0,
+               'myTeam': [{'cellId': 0, 'championId': 22, 'assignedPosition': '', 'gameName': 'Me'},
+                          {'cellId': 1, 'championId': 412, 'assignedPosition': ''}],
+               'theirTeam': [], 'bans': {}, 'actions': []}
+    state = lcu.parse_session(session, NAMES.get)
+    assert state.my_role is None and state.my_pick == 'Ashe'
+    assert state.allies == {} and state.unassigned_allies == ['Thresh']
+
+
+def test_role_inference_respects_open_roles():
+    role_games = {('Thresh', 'SUPPORT'): 400, ('Thresh', 'BOTTOM'): 5}
+    assert lcu.assign_enemy_roles(['Thresh'], role_games, roles=['TOP', 'MIDDLE', 'SUPPORT']) == {'SUPPORT': 'Thresh'}
+    assert lcu.assign_enemy_roles(['Thresh'], role_games, roles=['TOP', 'MIDDLE']) in ({'TOP': 'Thresh'}, {'MIDDLE': 'Thresh'})

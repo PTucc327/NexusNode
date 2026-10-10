@@ -98,6 +98,11 @@ st.markdown("""
 .wp-blue { background: linear-gradient(90deg,#2563eb,#3b82f6); }
 .wp-red { background: linear-gradient(90deg,#f87171,#dc2626); }
 .wp-note { font-size: .78rem; opacity: .7; margin-top: .3rem; }
+.dmg { margin: .1rem 0 .6rem 0; font-size: .75rem; }
+.dmg-bar { display:flex; height: 8px; border-radius: 999px; overflow:hidden; margin: .2rem 0; }
+.dmg-ad { background: #f97316; } .dmg-ap { background: #8b5cf6; }
+.dmg-labels { display:flex; justify-content:space-between; opacity:.8; }
+.dmg-warn { color: #dc2626; font-weight: 600; }
 .rec-card { border: 1px solid rgba(128,128,128,.3); border-radius: 14px; padding: .9rem .8rem;
   text-align:center; height: 100%; background: rgba(128,128,128,.05); }
 .rec-card.top { border-color: #f59e0b; box-shadow: 0 0 0 1px #f59e0b inset; }
@@ -225,12 +230,17 @@ def draft_from_client(state):
     """Widget values for a parsed champ-select state (full sync, so slots the
     client shows as empty are cleared too)."""
     updates = {}
+    # Blind modes (Practice Tool, Blind Pick) don't assign roles: keep the role
+    # the player chose in the app and infer allies' roles from play rates.
+    my_role = state.my_role or st.session_state.get("user_role") or "BOTTOM"
     if state.my_role:
         updates["user_role"] = state.my_role
+    allies = dict(state.allies)
+    open_roles = [r for r in ROLES if r != my_role and r not in allies]
+    allies.update(assign_enemy_roles(state.unassigned_allies, engine.role_games, open_roles))
     for r in ROLES:
-        updates[f"blue_{r}"] = state.allies.get(r)
-    if state.my_role:
-        updates[f"blue_{state.my_role}"] = state.my_pick
+        updates[f"blue_{r}"] = allies.get(r)
+    updates[f"blue_{my_role}"] = state.my_pick
     enemy_roles = assign_enemy_roles(state.enemies, engine.role_games)
     for r in ROLES:
         updates[f"red_{r}"] = enemy_roles.get(r)
@@ -276,14 +286,15 @@ with st.sidebar:
         st.toggle("Sync with champion select", key="lcu_on",
                   help="Reads your own champ select (picks, bans, your role) from the League client on "
                        "this computer. Read-only: it never picks, bans or clicks anything for you.")
-        league_client_sync()
+        lcu_status = st.container()  # filled by league_client_sync() at the end of the page
         st.divider()
     st.header("🎯 Your role")
-    # Only pass a default when nothing (e.g. the League client sync) has set
-    # the role yet; Streamlit warns if a widget gets both.
+    # The starting role lives in session state (the League client sync can
+    # also set it); the widget's own parameters stay constant so Streamlit
+    # keeps treating it as the same widget across reruns.
+    st.session_state.setdefault("user_role", "BOTTOM")
     user_role = st.segmented_control(
-        "Your role", ROLES, default=None if "user_role" in st.session_state else "BOTTOM",
-        key="user_role", label_visibility="collapsed",
+        "Your role", ROLES, key="user_role", label_visibility="collapsed",
         format_func=lambda r: f"{ROLE_ICONS[r]} {ROLE_LABELS[r]}",
     ) or "BOTTOM"
 
@@ -357,15 +368,36 @@ def draft_slot(team, role):
 bans = st.multiselect("🚫 Bans", champ_list, key="bans", format_func=name, max_selections=10,
                       placeholder="Add banned champions (they won't be recommended)…")
 
+def damage_meter(picks):
+    """AD/AP split of a team's picks, from the damage each champion deals in games."""
+    dmg = engine.team_damage(picks)
+    if dmg is None:
+        return '<div class="dmg"><div class="dmg-labels"><span>Damage: no picks yet</span></div></div>'
+    ad, n = dmg
+    warn = ""
+    if ad >= 0.75:
+        warn = '<span class="dmg-warn">Very AD-heavy: enemies can stack armor</span>'
+    elif ad <= 0.25:
+        warn = '<span class="dmg-warn">Very AP-heavy: enemies can stack magic resist</span>'
+    return (f'<div class="dmg"><div class="dmg-labels"><span>Physical {ad:.0%}</span>'
+            f'<span>{n} pick{"s" if n != 1 else ""}</span><span>Magic {1 - ad:.0%}</span></div>'
+            f'<div class="dmg-bar"><div class="dmg-ad" style="width:{ad * 100:.0f}%"></div>'
+            f'<div class="dmg-ap" style="width:{(1 - ad) * 100:.0f}%"></div></div>{warn}</div>')
+
+
 col_blue, col_red = st.columns(2, gap="large")
 with col_blue:
     with st.container(border=True):
         st.markdown('<div class="team-title blue">💙 Your team</div>', unsafe_allow_html=True)
+        blue_meter = st.empty()
         blue = {r: draft_slot("blue", r) for r in ROLES}
+        blue_meter.markdown(damage_meter(blue), unsafe_allow_html=True)
 with col_red:
     with st.container(border=True):
         st.markdown('<div class="team-title red">❤️ Enemy team</div>', unsafe_allow_html=True)
+        red_meter = st.empty()
         red = {r: draft_slot("red", r) for r in ROLES}
+        red_meter.markdown(damage_meter(red), unsafe_allow_html=True)
 
 # Duplicate guard: a champion can only be picked once per game
 picked = [c for c in list(blue.values()) + list(red.values()) if c]
@@ -511,3 +543,10 @@ Each component was kept only if it improved predictions on held-out matches.
 
 # Exact legal boilerplate required by Riot's developer policies
 st.caption(LEGAL_NOTICE)
+
+# Run the League client sync LAST: it may trigger a rerun, and widgets that
+# haven't rendered yet in the interrupted run would lose their values
+# (your role, comfort pool). Its status still shows in the sidebar slot.
+if DESKTOP_MODE:
+    with lcu_status:
+        league_client_sync()

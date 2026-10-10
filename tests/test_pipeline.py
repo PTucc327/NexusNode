@@ -110,3 +110,39 @@ def test_match_metadata_order_matches_tensors():
     assert y.tolist() == [0.0, 1.0]           # A: blue lost, B: blue won
     assert list(meta.game_version) == ['16.19', '16.20']
     assert np.array_equal(blue[0].numpy(), blue[1].numpy())
+
+
+# --- damage type --------------------------------------------------------------
+def test_observed_damage_overrides_style_ratings():
+    # Riot's ratings put Gragas at 40% AD; in games he deals almost all magic damage
+    rating_only = champion_profiles(['Gragas'], damage={})[0, len(TAGS)]
+    observed = champion_profiles(['Gragas'], damage={'Gragas': (200, 0.05)})[0, len(TAGS)]
+    assert rating_only == pytest.approx(0.4)
+    assert observed < 0.1
+
+
+def test_damage_prior_dominates_with_few_games():
+    one_game = champion_profiles(['Gragas'], damage={'Gragas': (1, 0.9)})[0, len(TAGS)]
+    assert abs(one_game - 0.4) < abs(one_game - 0.9)  # 1 game barely moves the 5-game prior
+
+
+def test_build_damage_profiles():
+    from modules.preprocess import build_damage_profiles
+    df = pd.DataFrame({'champion_name': ['Jhin', 'Jhin', 'Syndra'],
+                       'physical_damage_to_champs': [900, 1100, 100],
+                       'magic_damage_to_champs': [100, 0, 1900]})
+    t = build_damage_profiles(df).set_index('champion_name')
+    assert t.loc['Jhin', 'games'] == 2 and t.loc['Jhin', 'ad_share'] == pytest.approx(2000 / 2100)
+    assert t.loc['Syndra', 'ad_share'] == pytest.approx(0.05)
+    assert build_damage_profiles(df.drop(columns=['magic_damage_to_champs'])) is None
+
+
+def test_damage_skew_is_penalty_only():
+    """One-sided damage may lower a team's score, never raise it."""
+    m = T.NexusDraftModel(5, 3, profiles=np.zeros((5, 8), dtype=np.float32))
+    with torch.no_grad():
+        m.comp_power_raw.uniform_(-3, 3)
+        m.comp_cross_raw.normal_()
+    w, q = m.comp_power(), m.comp_cross_matrix()
+    assert (w[T.PENALTY_ONLY] <= 0).all()
+    assert torch.allclose(q[T.PENALTY_ONLY, :], torch.zeros(1)) and torch.allclose(q[:, T.PENALTY_ONLY], torch.zeros(1))

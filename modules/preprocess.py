@@ -29,6 +29,25 @@ def build_node_features(df):
         nodes[f'feat_{feat_name}'] = scaled[:, i]
     return nodes, scaled
 
+def build_damage_profiles(df):
+    """Per-champion damage TYPE from real games: games observed and the share
+    of physical vs. magic damage dealt to champions (true damage excluded, as
+    it's neither). None if the data predates damage-type tracking."""
+    cols = ['physical_damage_to_champs', 'magic_damage_to_champs']
+    if not set(cols) <= set(df.columns):
+        return None
+    d = df.dropna(subset=cols)
+    if d.empty:
+        return None
+    table = d.groupby('champion_name').agg(
+        games=('physical_damage_to_champs', 'size'),
+        physical=('physical_damage_to_champs', 'sum'),
+        magic=('magic_damage_to_champs', 'sum'),
+    ).reset_index()
+    table['ad_share'] = table['physical'] / (table['physical'] + table['magic']).clip(lower=1)
+    return table[['champion_name', 'games', 'ad_share']]
+
+
 def build_pair_tables(df):
     """Teammate (synergy) and opponent (counter) pair records for every match.
 
@@ -71,6 +90,7 @@ def generate_graph_data():
     output_counters = './data/processed/champion_counter_edges.csv'
     output_roles = './data/processed/champion_roles.json'
     output_matchups = './data/processed/champion_matchups.csv'
+    output_damage = './data/processed/champion_damage.csv'
 
     if not os.path.exists(input_path):
         print(f"❌ Error: {input_path} not found.")
@@ -145,6 +165,9 @@ def generate_graph_data():
     synergy_table.to_csv(output_synergy, index=False)
     counter_table.to_csv(output_counters, index=False)
     matchup_table.to_csv(output_matchups, index=False)
+    damage_table = build_damage_profiles(df)
+    if damage_table is not None:
+        damage_table.to_csv(output_damage, index=False)
 
     with open(output_roles, 'w') as f:
         json.dump(role_mapping, f)

@@ -58,16 +58,22 @@ def read_lockfile(path=None):
 
 
 def _pinned_context():
-    """TLS context that only trusts Riot's CA (fingerprint-checked). Hostname
-    checking is off because the client's cert names 127.0.0.1 only in its CN,
-    which Python no longer matches; the chain to Riot's CA is still required,
-    and we only connect to 127.0.0.1."""
+    """TLS context that only trusts Riot's CA (fingerprint-checked), with full
+    chain and hostname verification (the client's cert lists 127.0.0.1).
+
+    The one relaxation: Python 3.13+ enables X509 "strict" mode by default,
+    which rejects Riot's 2013-era CA because it predates the Authority Key
+    Identifier extension ("Missing Authority Key Identifier"). Standard
+    verification of the client's certificate against that CA still passes,
+    so only the strict flag is cleared; signature, validity and hostname
+    checks all remain on."""
     with open(RIOT_CA_PATH, 'r', encoding='ascii') as f:
         pem = f.read()
     if hashlib.sha256(ssl.PEM_cert_to_DER_cert(pem)).hexdigest() != RIOT_CA_SHA256:
         raise LCUError('Bundled Riot CA certificate failed its fingerprint check.')
     ctx = ssl.create_default_context(cadata=pem)
-    ctx.check_hostname = False
+    ctx.verify_flags &= ~getattr(ssl, 'VERIFY_X509_STRICT', 0)
+    ctx.check_hostname = True
     ctx.verify_mode = ssl.CERT_REQUIRED
     return ctx
 
@@ -117,6 +123,7 @@ class DraftState:
     my_role: str = None                            # local player's assigned role, if known
     my_pick: str = None
     allies: dict = field(default_factory=dict)     # {role: champion}
+    unassigned_allies: list = field(default_factory=list)  # picks with no role shown (blind modes)
     enemies: list = field(default_factory=list)    # champions (enemy roles aren't shown in ranked)
     bans: list = field(default_factory=list)
 
@@ -139,6 +146,8 @@ def parse_session(session, champion_name):
             state.my_role, state.my_pick = role, champ
         elif champ and role:
             state.allies[role] = champ
+        elif champ:
+            state.unassigned_allies.append(champ)
     state.enemies = [c for c in (name(m.get('championId')) for m in session.get('theirTeam', [])) if c]
 
     bans = set()
@@ -155,14 +164,16 @@ def parse_session(session, champion_name):
     return state
 
 
-def assign_enemy_roles(enemies, role_games):
-    """Ranked champ select doesn't show enemy roles; infer the most likely
-    assignment from how often each champion is played in each role.
+def assign_enemy_roles(enemies, role_games, roles=ROLES):
+    """Infer the most likely roles for champions whose role isn't shown
+    (enemies in ranked; everyone in blind modes) from how often each champion
+    is played in each role, using only the given open roles.
     role_games: {(champion, role): games}. Returns {role: champion}."""
-    enemies = list(enemies)[:len(ROLES)]
+    roles = list(roles)
+    enemies = list(enemies)[:len(roles)]
     if not enemies:
         return {}
-    score = {(c, r): np.log1p(role_games.get((c, r), 0)) for c in enemies for r in ROLES}
-    best = max(itertools.permutations(ROLES, len(enemies)),
+    score = {(c, r): np.log1p(role_games.get((c, r), 0)) for c in enemies for r in roles}
+    best = max(itertools.permutations(roles, len(enemies)),
                key=lambda roles: sum(score[(c, r)] for c, r in zip(enemies, roles)))
     return {r: c for c, r in zip(enemies, best)}

@@ -34,7 +34,12 @@ from sklearn.metrics import roc_auc_score
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from modules.preprocess import build_node_features  # noqa: E402
-from modules.composition import champion_profiles, team_features, NUM_FEATURES  # noqa: E402
+from modules.composition import champion_profiles, team_features, NUM_FEATURES, FEATURE_NAMES  # noqa: E402
+
+# Penalty-only features: one-sided damage can lower a team's score but never
+# raise it. (The unconstrained fit gave AP-heavy teams a small bonus, most
+# likely riding on the current mage-bot meta rather than a real effect.)
+PENALTY_ONLY = [FEATURE_NAMES.index(f) for f in ('ad_heavy', 'ap_heavy')]
 
 ROLES = ['TOP', 'JUNGLE', 'MIDDLE', 'BOTTOM', 'SUPPORT']
 SEED = 7
@@ -52,6 +57,10 @@ MIN_MATCHES = 1000
 PATIENCE = 40
 LR = 3e-3
 WEIGHT_DECAY = 5e-2
+# Composition has only ~44 weights; the heavy decay above (meant for the
+# embedding tables) squeezed them to ~0, e.g. damage balance was worth
+# ~0.25 pts in the model vs ~5 pts in the raw data.
+COMP_WEIGHT_DECAY = 1e-3  # time-based CV: better than 5e-2 in 4/4 seeds; ~= 0, kept as a small safeguard
 DROPOUT = 0.5
 # Prior std (logit) of a champion's strength in a specific role. Acts as
 # sample-size shrinkage: a 12-game role win rate barely moves its estimate,
@@ -171,7 +180,9 @@ class NexusDraftModel(nn.Module):
         self.use_composition = USE_COMPOSITION and profiles is not None
         if self.use_composition:
             self.register_buffer('profiles', torch.as_tensor(profiles))
-        self.comp_power = nn.Parameter(torch.zeros(NUM_FEATURES))
+        self.comp_power_raw = nn.Parameter(torch.zeros(NUM_FEATURES))
+        with torch.no_grad():
+            self.comp_power_raw[PENALTY_ONLY] = 0.2  # weight = -raw**2; nonzero start so it can learn
         self.comp_cross_raw = nn.Parameter(torch.randn(NUM_FEATURES, NUM_FEATURES) * 0.01)
         self.use_enemy_terms = use_enemy_terms
         self.use_shared_power = USE_SHARED_POWER
@@ -198,8 +209,19 @@ class NexusDraftModel(nn.Module):
     def lane_matrix(self):
         return self.lane_raw - self.lane_raw.T
 
+    def comp_power(self):
+        """Composition weights, with penalty-only features forced <= 0."""
+        w = self.comp_power_raw.clone()
+        w[PENALTY_ONLY] = -self.comp_power_raw[PENALTY_ONLY] ** 2
+        return w
+
     def comp_cross_matrix(self):
-        return self.comp_cross_raw - self.comp_cross_raw.T
+        """Antisymmetric comp-vs-comp term; penalty-only features are excluded
+        so a one-sided team can't pick up a bonus through it."""
+        mask = torch.ones(NUM_FEATURES, NUM_FEATURES)
+        mask[PENALTY_ONLY, :] = 0
+        mask[:, PENALTY_ONLY] = 0
+        return (self.comp_cross_raw - self.comp_cross_raw.T) * mask
 
     def embed(self, x, graph):
         ids = torch.arange(x.size(0))
@@ -236,7 +258,7 @@ class NexusDraftModel(nn.Module):
             logit = logit + cross.sum(dim=(1, 2)) + lane.sum(dim=1)
         if self.use_composition:
             g_blue, g_red = team_features(self.profiles[blue]), team_features(self.profiles[red])
-            logit = logit + (g_blue - g_red) @ self.comp_power
+            logit = logit + (g_blue - g_red) @ self.comp_power()
             if self.use_enemy_terms:
                 logit = logit + ((g_blue @ self.comp_cross_matrix()) * g_red).sum(dim=-1)
         return logit
@@ -300,9 +322,12 @@ def fit(model, x, graph, blue, red, y, epochs, val=None, weight=None):
     torch.manual_seed(SEED)
     # role_bias has its own explicit prior (bias_penalty), so no weight decay on it
     bias_params = list(model.role_bias.parameters())
-    other_params = [p for n, p in model.named_parameters() if not n.startswith('role_bias')]
+    comp_params = [model.comp_power_raw, model.comp_cross_raw]
+    special = {id(p) for p in bias_params + comp_params}
+    other_params = [p for p in model.parameters() if id(p) not in special]
     optimizer = torch.optim.Adam([
         {'params': other_params, 'weight_decay': WEIGHT_DECAY},
+        {'params': comp_params, 'weight_decay': COMP_WEIGHT_DECAY},
         {'params': bias_params, 'weight_decay': 0.0},
     ], lr=LR)
     best = (0, None, float('inf'))
@@ -439,7 +464,7 @@ def train_model():
             'role_embeddings': model.role_embed.detach().clone(),
             'power': model.power.detach().clone() if model.use_shared_power else torch.zeros_like(model.power),
             'profiles': torch.as_tensor(profiles) if model.use_composition else None,
-            'comp_power': model.comp_power.detach().clone(),
+            'comp_power': model.comp_power().detach().clone(),
             'comp_cross': model.comp_cross_matrix().detach().clone(),
             'role_strength': model.role_bias.weight.detach().view(len(champions), len(ROLES)).clone(),
             'synergy': model.synergy_matrix().detach().clone(),

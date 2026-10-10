@@ -37,14 +37,14 @@ The project is structured as a modular MLOps Pipeline:
 - Learning (train_gnn.py):
 
   - **Role strength**: a per-(champion, role) term with a Gaussian prior, so small samples are shrunk toward average and a champion's main-role results don't leak into its off-roles.
-  - **Team composition** (composition.py): class mix, AD/AP imbalance, and frontline for each team, from Data Dragon class tags and damage ratings, with an antisymmetric composition-vs-composition term.
+  - **Team composition** (composition.py): class mix, frontline, and AD/AP skew for each team, with an antisymmetric composition-vs-composition term. AD/AP share is **measured from the physical vs. magic damage each champion actually deals in games** (Riot's 0-10 style ratings are only a fallback prior; they rate Gragas and Elise ~45% AD, while both deal ~90% magic damage). Damage skew is split into AD-heavy and AP-heavy terms and constrained to be **penalty-only**: a one-sided team can lose points, never gain them. In this data AD-heavy teams lose noticeably more often, while AP-heavy teams don't.
   - **Relational GNN** (one GCN per relation) produces champion embeddings feeding ally-synergy (symmetric) and enemy-counter (antisymmetric, all 25 ally-vs-enemy pairs) bilinear terms, trained end-to-end on match outcomes.
   - **Lane matchup evidence**: observed head-to-head lane results, estimated as residuals against the model with sample-size shrinkage.
   - **Patch recency**: matches are weighted by `0.5 ** (patches_behind / 8)`, so the current meta dominates while older patches still contribute.
 
   Every component and setting is kept only if it improves log loss on the **newest** held-out matches (rolling time-based validation, averaged over seeds where effects are small). With the current data, cross-validation showed lane matchups are the only pairwise signal that generalizes. Observed cross-role counters and teammate synergy made predictions worse, and the GNN's interaction terms are regularized to near zero. They grow as more data arrives.
 
-- Deployment (app.py, engine.py): A Streamlit draft assistant with champion portraits (Data Dragon), bans, a live win-probability bar, and ranked recommendations explained by role strength (with sample size), team composition, lane matchup records, and synergy/counters relative to the other options.
+- Deployment (app.py, engine.py): A Streamlit draft assistant with champion portraits (Data Dragon), bans, a live win-probability bar, and ranked recommendations explained by role strength (with sample size), team composition, lane matchup records, and synergy/counters relative to the other options. A damage meter shows each team's real physical/magic split and flags very one-sided teams.
 
   - **Counter pick**: when your lane opponent is locked in, picks are scored directly against them.
   - **Blind pick**: otherwise, picks are scored against the 12 most-played champions still available for that role, and picks that one of them specifically counters (worse than other picks fare against it) are ranked lower and flagged ("Countered by Jayce").

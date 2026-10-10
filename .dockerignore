@@ -19,3 +19,9 @@ notebooks
 images
 data/raw
 README.md
+
+# Training pipeline: not used by the app at runtime
+modules/collect_data.py
+modules/eda.py
+modules/preprocess.py
+modules/train_gnn.py
