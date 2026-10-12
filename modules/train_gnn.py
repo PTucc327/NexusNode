@@ -78,6 +78,7 @@ BLUE_TEAM_ID = 100
 INPUT_PATH = './data/processed/cleaned_league_match_data.csv'
 OUTPUT_PATH = './data/processed/nexus_model.pt'
 METRICS_PATH = './data/processed/model_metrics.json'
+ROLES_PATH = './data/processed/champion_roles.json'
 
 
 # --- 1. DATA ---------------------------------------------------------------
@@ -369,6 +370,57 @@ def calibration_table(probs, y, bins=5):
             for idx in torch.tensor_split(order, bins)]
 
 
+def decision_quality(model, z, blue, red, y, effects, champions, roles_map, chunk=50_000):
+    """Do the recommendations point to winning picks? For every player in the
+    held-out matches, rank the champion they actually played among all
+    role-eligible options (with the other nine champions known), then report
+    how often players won by where the model ranked their pick.
+
+    Scores every candidate draft in batched forward passes (same scoring as
+    the app: model + lane evidence) instead of per-pick engine calls."""
+    index = {c: i for i, c in enumerate(champions)}
+    eligible = {r: [index[c] for c in roles_map.get(r, []) if c in index] for r in ROLES}
+    blue_rows, red_rows, groups = [], [], []   # groups: (start, end, actual_pos, sign, won)
+    for b, r_, won in zip(blue.tolist(), red.tolist(), y.tolist()):
+        for side, team, sign, side_won in (('blue', b, 1.0, won), ('red', r_, -1.0, 1 - won)):
+            for slot, role in enumerate(ROLES):
+                others = set(b + r_) - {team[slot]}
+                cands = [c for c in eligible[role] if c not in others]
+                if team[slot] not in cands:
+                    continue
+                start = len(blue_rows)
+                for c in cands:
+                    nb, nr = list(b), list(r_)
+                    (nb if side == 'blue' else nr)[slot] = c
+                    blue_rows.append(nb)
+                    red_rows.append(nr)
+                groups.append((start, len(blue_rows), start + cands.index(team[slot]), sign, side_won))
+    B, R = torch.tensor(blue_rows), torch.tensor(red_rows)
+    model.eval()
+    with torch.no_grad():
+        logits = torch.cat([model(z, B[i:i + chunk], R[i:i + chunk]) for i in range(0, len(B), chunk)])
+    logits = logits + apply_lane_evidence(B, R, effects)
+
+    picks = []
+    for start, end, actual, sign, won in groups:
+        scores = sign * logits[start:end]
+        rank = int((scores > sign * logits[actual]).sum())
+        picks.append((rank, rank / max(end - start - 1, 1), won))
+
+    def bucket(rows):
+        won = [w for _, _, w in rows]
+        rate = sum(won) / len(won) if won else 0.0
+        return {'picks': len(won), 'won': rate,
+                'ci95': 1.96 * (rate * (1 - rate) / len(won)) ** 0.5 if won else 0.0}
+    return {
+        'top5': bucket([p for p in picks if p[0] < 5]),
+        'top_third': bucket([p for p in picks if p[1] <= 1 / 3]),
+        'middle_third': bucket([p for p in picks if 1 / 3 < p[1] <= 2 / 3]),
+        'bottom_third': bucket([p for p in picks if p[1] > 2 / 3]),
+        'share_of_picks_in_top5': sum(p[0] < 5 for p in picks) / len(picks),
+    }
+
+
 def passes_release_gate(n_matches, shipped_log_loss, baseline_log_loss, min_matches=None):
     """True if a newly trained model may replace the published one."""
     min_matches = MIN_MATCHES if min_matches is None else min_matches
@@ -457,6 +509,12 @@ def train_model():
         'after': calibration_table(torch.sigmoid(sym_logits / temperature), sym_y),
     }
     print(f"   calibration temperature {temperature:.2f} (>1 = predictions were overconfident)")
+
+    with open(ROLES_PATH) as f:
+        roles_map = json.load(f)
+    dq = decision_quality(full_model, z_tr, *val, effects, champions, roles_map)
+    print(f"   decision quality: model's top-5 picks won {dq['top5']['won']:.1%} "
+          f"vs bottom third {dq['bottom_third']['won']:.1%}")
     for name in ('full_model_refit', 'full_model_plus_lane_evidence'):
         r = results[name]
         print(f"   {name:22s} | val log loss {r['log_loss']:.4f} | acc {r['accuracy']:.3f} | AUC {r['auc']:.3f}")
@@ -522,6 +580,7 @@ def train_model():
         'patch_half_life': PATCH_HALF_LIFE,
         'use_composition': bool(model.use_composition),
         'calibration': calibration,
+        'decision_quality': dq,
         'validation': results,
     }
     with open(METRICS_PATH, 'w') as f:

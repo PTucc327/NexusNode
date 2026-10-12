@@ -55,12 +55,15 @@ jobs:
     - name: 4. Run GNN Training (Draft Model)
       run: python modules/train_gnn.py
 
-    - name: 5. Run Tests Against the New Model (blocks the commit on failure)
+    - name: 5. Refresh README Metrics (from model_metrics.json; tests check it matches)
+      run: python modules/update_readme.py
+
+    - name: 6. Run Tests Against the New Model (blocks the commit on failure)
       env:
         NEXUSNODE_OFFLINE: '1'
       run: python -m pytest tests -q
 
-    - name: 6. Refresh Champion Metadata Snapshot (names/icons)
+    - name: 7. Refresh Champion Metadata Snapshot (names/icons)
       run: python modules/champions.py || echo "Data Dragon unavailable, keeping existing snapshot"
 
     - name: Commit and Push All Changes
@@ -68,8 +71,9 @@ jobs:
         git config --global user.name "NexusNode-Bot"
         git config --global user.email "bot@nexusnode.ai"
 
-        # Data, processed graph files, and model weights all live under data/
-        git add data/
+        # Data, processed graph files and model weights live under data/;
+        # the README's Model Performance block is regenerated from the metrics
+        git add data/ README.md
 
         # Commit only if there are actual modifications
         if [ -n "$(git status --porcelain)" ]; then
