@@ -154,3 +154,41 @@ def test_fit_temperature_recovers_overconfidence():
     y = torch.bernoulli(torch.sigmoid(true_logits))
     assert T.fit_temperature(true_logits * 2.0, y) == pytest.approx(2.0, abs=0.15)  # 2x overconfident
     assert T.fit_temperature(true_logits, y) == pytest.approx(1.0, abs=0.1)        # already calibrated
+
+
+# --- Scraper resilience: a dropped connection must not kill the weekly run ---
+
+def _no_sleep(monkeypatch):
+    import modules.collect_data as cd
+    monkeypatch.setattr(cd.time, 'sleep', lambda s: None)
+    return cd
+
+
+def test_call_with_retry_recovers_from_dropped_connection(monkeypatch):
+    import requests
+    cd = _no_sleep(monkeypatch)
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise requests.exceptions.ConnectionError('Remote end closed connection without response')
+        return 'ok'
+
+    assert cd.call_with_retry(flaky) == 'ok'
+    assert len(calls) == 3
+
+
+def test_persistent_network_error_skips_match_instead_of_crashing(monkeypatch):
+    import requests
+    cd = _no_sleep(monkeypatch)
+
+    class FakeMatch:
+        def by_id(self, routing, match_id):
+            raise requests.exceptions.ConnectionError('down')
+
+    class FakeWatcher:
+        match = FakeMatch()
+
+    monkeypatch.setattr(cd, 'WATCHER', FakeWatcher())
+    assert cd.fetch_match('americas', 'BR1_1') is None

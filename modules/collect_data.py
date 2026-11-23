@@ -1,6 +1,7 @@
 import sys
 import argparse
 import pandas as pd
+import requests
 from riotwatcher import LolWatcher, ApiError
 import time
 import os
@@ -10,10 +11,12 @@ from dotenv import load_dotenv
 # --- CONFIGURATION ---
 load_dotenv()
 API_KEY = os.getenv('RIOT_KEY')
-WATCHER = LolWatcher(API_KEY) if API_KEY else None
+# Without a timeout a stalled connection can hang the job until the workflow limit
+REQUEST_TIMEOUT = 30
+WATCHER = LolWatcher(API_KEY, timeout=REQUEST_TIMEOUT) if API_KEY else None
 QUEUE_TYPE = 'RANKED_SOLO_5x5'
 RANKED_SOLO_QUEUE_ID = 420  # match-v5 queue id for Ranked Solo/Duo
-MAX_RETRIES = 3
+MAX_RETRIES = 4
 
 # Scale knobs (env-overridable). Defaults fit a development key's
 # 100 requests / 2 minutes; with a production key, lower REQUEST_DELAY.
@@ -50,15 +53,30 @@ TEXT_COLUMNS = {'game_version': str}
 # Apex tiers to sample players from (league-v4 endpoint per tier)
 TIERS = ['challenger', 'grandmaster']
 
+# Network blips (Riot closing a keep-alive connection, timeouts) and Riot 5xx
+# errors are transient: retry them, and if they persist skip that one player or
+# match instead of crashing a ~1h scrape and losing the whole weekly refresh.
+NETWORK_ERRORS = (requests.exceptions.ConnectionError, requests.exceptions.Timeout)
+SKIPPABLE_ERRORS = (ApiError, requests.exceptions.RequestException)
+
 class RiotAuthError(Exception):
     """Key rejected (401/403). Not an ApiError subclass, so per-player
     `except ApiError: continue` handlers can't swallow it."""
 
 def call_with_retry(fn, *args, **kwargs):
-    """Calls a Riot endpoint, honoring 429 Retry-After instead of dropping data."""
+    """Calls a Riot endpoint, honoring 429 Retry-After instead of dropping data
+    and retrying dropped connections / timeouts / 5xx with backoff."""
     for attempt in range(MAX_RETRIES):
+        last_attempt = attempt == MAX_RETRIES - 1
         try:
             return fn(*args, **kwargs)
+        except NETWORK_ERRORS as err:
+            if last_attempt:
+                raise
+            wait = 2 ** (attempt + 1)
+            print(f"🔌 Network error ({type(err).__name__}). Retrying in {wait}s...")
+            time.sleep(wait)
+            continue
         except ApiError as err:
             if err.response is not None and err.response.status_code in (401, 403):
                 raise RiotAuthError(
@@ -68,6 +86,11 @@ def call_with_retry(fn, *args, **kwargs):
             if err.response is not None and err.response.status_code == 429 and attempt < MAX_RETRIES - 1:
                 wait = int(err.response.headers.get('Retry-After', 20))
                 print(f"⏳ Rate limited. Sleeping for {wait}s...")
+                time.sleep(wait)
+                continue
+            if err.response is not None and err.response.status_code >= 500 and not last_attempt:
+                wait = 2 ** (attempt + 1)
+                print(f"⏳ Riot server error ({err.response.status_code}). Retrying in {wait}s...")
                 time.sleep(wait)
                 continue
             raise
@@ -113,7 +136,7 @@ def get_massive_match_ids(platform, routing, processed_ids):
         print(f"🚀 Fetching {tier.title()} players for {platform.upper()}...")
         try:
             players = get_league_players(platform, tier)
-        except ApiError as err:
+        except SKIPPABLE_ERRORS as err:
             print(f"❌ Error fetching {tier} in {platform}: {err}")
             continue
 
@@ -139,7 +162,8 @@ def get_massive_match_ids(platform, routing, processed_ids):
 
                 time.sleep(REQUEST_DELAY) # Rate limit respect
 
-            except ApiError:
+            except SKIPPABLE_ERRORS as err:
+                print(f"⚠️ Skipping a {platform} player: {err}")
                 continue
 
     # Newest first (match ids are sequential per platform), capped per run
@@ -153,7 +177,7 @@ def patch_of(game_version):
 def fetch_match(routing, match_id):
     try:
         return call_with_retry(WATCHER.match.by_id, routing, match_id)
-    except ApiError as err:
+    except SKIPPABLE_ERRORS as err:
         print(f"⚠️ Skipping {match_id}: {err}")
         return None
 
